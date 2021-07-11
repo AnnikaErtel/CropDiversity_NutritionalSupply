@@ -1,0 +1,1627 @@
+#####Affiliance
+
+#Annika Ertel
+#Universität Leipzig/ Institut für Geographie
+#Matrikelnummer: 3710313 
+
+#SKRIPT 2: nutritional demand
+
+####Setting up
+
+setwd("~/data/MAS-group-share/04_personal/Annika/CropDiversity_NutritionalStability_new")
+rm(list=ls())
+
+library(tidyverse)
+library(readxl)
+
+# Explanation to the skript
+# For split data & country selection see: skript:"01_country_selection_&_split.R"
+# Due to missing computing capacity the dataframe is split into countries and looped in this skript.
+# 03_nutr_demand.R is the skript, which provide the loop and thus the full calculation. 
+# nutr_demand.Rmd provide a better layouted version, as the skript contains additional infos and thoughts-
+# but does not work in loop and thus does not show the complete calculation
+
+####LOAD DATA####
+#list of files in folder (needed for the loop)
+pop<-list.files(path ="~/data/MAS-group-share/04_personal/Annika/CropDiversity_NutritionalStability_new/data/pop_data/worldbank/pop_ISO", pattern = "*.csv")
+birth_rate<-list.files(path="~/data/MAS-group-share/04_personal/Annika/CropDiversity_NutritionalStability_new/data/pop_data/worldbank/birth_rate_ISO", pattern = "*.csv")
+
+#Dietry Referece Values (the same for each loop)
+DRVs_Adults_orig<-read_xlsx("~/data/MAS-group-share/04_personal/Annika/CropDiversity_NutritionalStability_new/data/efsa_DRV/DRVs_Adults.xlsx")
+DRVs_Children_orig<-read_xlsx("~/data/MAS-group-share/04_personal/Annika/CropDiversity_NutritionalStability_new/data/efsa_DRV/DRVs_Children_and adolescents.xlsx")
+DRVs_Infants_orig<-read_xlsx("~/data/MAS-group-share/04_personal/Annika/CropDiversity_NutritionalStability_new/data/efsa_DRV/DRVs_Infants.xlsx")
+DRVs_Lactating_orig<-read_xlsx("~/data/MAS-group-share/04_personal/Annika/CropDiversity_NutritionalStability_new/data/efsa_DRV/DRVs_Lactating_women.xlsx")
+DRVs_Pregnant_orig<-read_xlsx("~/data/MAS-group-share/04_personal/Annika/CropDiversity_NutritionalStability_new/data/efsa_DRV/DRVs_Pregnant_women.xlsx")
+
+#Reference weights efsa
+ref_weight<-read.csv("~/data/MAS-group-share/04_personal/Annika/CropDiversity_NutritionalStability/data/efsa_DRV/reference_weights_efsa.csv")
+
+####LOOP####
+for(i in 1:length(pop)){
+  #load csv from list of files
+  
+  #Population data  ISO COUNTRY
+  ISO_pop<-read_csv(paste0("data/pop_data/worldbank/pop_ISO/", pop[5]))  
+  ISO_birth_rate<-read.csv(paste0("data/pop_data/worldbank/birth_rate_ISO/", birth_rate[5]))
+  
+  
+####POPULATION DATA PREPARATION####
+  
+# For analysing, I need population data for each year and each country. 
+# I need the information on sex and age seperated. I need age and years to be numeric.
+  
+  #set NAs
+  ISO_pop[ISO_pop == ".."] <- NA
+  
+  #Extract Sex
+  ISO_pop$sex<- ifelse(str_detect(ISO_pop$'Series Name', "female"),"female", "male")
+  
+  #Extract Ages
+  ISO_pop$age<-as.integer(str_extract(ISO_pop$'Series Name', "\\d+"))    #mind: just took lower limit of the aggregated class!!!
+  
+  #Remove Year 2020 as it has no values
+  ISO_pop$'2020 [YR2020]'<-NULL
+  
+  #From wide to long
+  ISO_pop<-ISO_pop%>%
+    pivot_longer('1960 [YR1960]':'2019 [YR2019]', names_to = "Year", values_to = "Population")
+  
+  #Years as numeric
+  ISO_pop$Year<-ISO_pop$Year%>%
+    str_sub(start = 1L, end = 5L)%>%  #Select just first 4, resp. just the numbers
+    as.numeric()
+  
+#There are aggregated ageclasses beginning with "25-29" (5-Year aggregates) and 
+# ending with "80 and above". I assume that the ages are equally distributed within 
+# the aggregated age class and thus can be splitted into each year. 
+#As the class "80 and above" has no upper limit, I "reduce" it to 80- thus assuming 
+# that the nutrient requirements stay the same for people older than 80. 
+  
+  #filter ISO_Pop for interpolating aggregates
+  ISO_pop_aggr<-filter(ISO_pop, str_detect(ISO_pop$"Series Name", "interpolated", negate = TRUE))     #all aggregates 
+  ISO_pop_aggr<-filter(ISO_pop_aggr, age != 80)            #exclude 80yr old from interpolation
+  
+  #interpolate: equal distribution within each age class
+  ISO_pop_aggr$Population<-ISO_pop_aggr$Population/5
+  
+  #for each year,sex and ageclass create 5 new rows with increasing ages 
+  ISO_pop_25_79<-ISO_pop_aggr %>% 
+    slice(rep(1:n(), each = 5))     #repeat each entry 5 times
+  
+  ISO_pop_25_79<-ISO_pop_25_79%>%
+    group_by(sex, Year) %>%
+    mutate(age = seq(min(age), length.out = n()))     # adjust ages 
+  
+  #merge dataframes again
+  ISO_pop_noaggr<-filter(ISO_pop, str_detect(ISO_pop$"Series Name", "interpolated", negate = F))     # extract all data ages 0-25 (not prepared)
+  ISO_pop_above80<-filter(ISO_pop, age>=80)            #extract all above 80 (not prepared)
+  ISO_pop<-bind_rows(ISO_pop_noaggr, ISO_pop_25_79, ISO_pop_above80) #to one table
+  
+  #delete interpolated 25 year age group- as there is already a worldbank value
+  ISO_pop<-ISO_pop[!c(str_detect(ISO_pop$"Series Name", "interpolated") & ISO_pop$age == 25),]
+  
+
+####BIRTH RATE####
+#The "Birth rate, crude (per 1,000 people)" is provided in the World Development Indicators
+# Database of the Worldbank. It has no data yet for the years 2019 and 2020.  
+  
+  #Birth rate table preparation
+  ISO_birth_rate[ISO_birth_rate == ".."] <- NA    #set NAs
+  ISO_birth_rate[,c("X2019..YR2019.","X2020..YR2020.")]<-NULL   #no data available for 2019 and 2020
+  
+  #from wide to long
+  ISO_birth_rate<-ISO_birth_rate%>%
+    pivot_longer(X1960..YR1960.:X2018..YR2018., names_to = "Year", values_to = "Birth_rate (per 1000 people)")    
+  
+  #birthrate per 1000 in one collumn
+  ISO_birth_rate$birth_rate<-ISO_birth_rate$'Birth_rate (per 1000 people)'/1000
+  ISO_birth_rate$'Birth_rate (per 1000 people)'<-NULL  #delete the per 1000 people
+  
+  #Years as numeric
+  ISO_birth_rate$Year<-ISO_birth_rate$Year%>%
+    str_sub(start = 2L, end = 6L)%>%  #Select just first the 2.-6. character
+    as.numeric()
+
+  
+####PREGNANT AND LACTATING WOMEN####
+  
+# The population data of the Worldbank has no information about pregnant women,
+#so I use the "Birth rate, crude (per 1,000 people)" to approximate the number 
+#of pregnant women in each year.  
+# I assume that the childbearing age is 15-49, like it is assumed in other indicators
+#(e.g. "total fertility rate"). 
+# Every Pregnancy lasts 9 months, therefore I just take 9/12 of the actual pregnants 
+#to be pregnant in each year.  
+# Every Pregnancy is followed by 6 Months of lactating (general assumption of the efsa). 
+#To simplify it, I assume the lactating period to be in the same Year. 
+  
+  #Extract female in childbearing age from ISO_pop & no (birth rate) values for 2019
+  ISO_female<-ISO_pop%>%
+    filter(sex=="female", age >= 15, age <= 49, Year != 2019)
+  
+  #Joining tables
+  ISO_female<-left_join(ISO_female, ISO_birth_rate[,c("Year","birth_rate")], by= "Year")
+  
+  #Number of pregnants
+  ISO_female$pregnant<-ISO_female$Population*ISO_female$birth_rate #Calculation of pregnants
+  
+  ISO_female$pregnant<-ISO_female$pregnant*(9/12)   #just 9 months pregnancy
+  ISO_female$Population<-ISO_female$Population-ISO_female$pregnant #adjust population number
+  
+  #Number of lactating
+  ISO_female$lactating<-ISO_female$pregnant*(6/12)    #just 6 months lactating
+  ISO_female$Population<-ISO_female$Population-ISO_female$lactating #adjust population number
+  
+  #adjusted population number back to ISO_pop
+  ISO_pop<-left_join(ISO_pop, ISO_female[,c("Year","sex","age", "Population")], by= c("Year","sex", "age"))     #add adjusted female population
+  ISO_pop$Population<-ifelse(is.na(ISO_pop$Population.y),ISO_pop$Population.x, ISO_pop$Population.y)       #takes adjusted population if available
+
+  
+####DIETRY REFERENCE VALUES####
+  
+# Dietry Reference Values are provided by efsa. They are biased because the requirements 
+# are for average weighted europeans in 1993 resp. 2000  (see: DOI: 10.2903/j.efsa.2010.1458 in Chapter 5.6. Lifestage and sex).
+# Using the DRV provided by the efsa I have in mind that: Nutrient requirements of 
+# countries with smaller heights and thus lighter weights are overestimated.  
+# First: in preparation for joining the DRVs the population data is splitted into the 
+# categories given by the efsa. 
+  
+  ### Minimising the Bias
+  # If one find data on average weights for each Age and Sex group in the specific years for each country, 
+  # one could interpolate the requirements and minimise the bias.
+  # For nutrients whose requirement is associated with the metabolic rate, allometric interpolation (^0.75) can be used. 
+  # For nutrients whose requirement is not associated with the metabolic rate, isometric interpolation can be used.  
+  
+  # **Possible source of average weights**
+  #   https://www.ncdrisc.org/data-downloads-adiposity.html: this provides Country and Sex (not Age) specific BMIs (1975-2016) 
+
+  #Seperated clean Pop tables 
+  ISO_pop_pregnant<-ISO_female[,c("ISO","sex", "age", "Year", "pregnant")]
+  names(ISO_pop_pregnant)[names(ISO_pop_pregnant)=="pregnant"]<-"Population"   #rename column
+  
+  ISO_pop_lactating<-ISO_female[,c("ISO", "sex","age", "Year", "lactating")]
+  names(ISO_pop_lactating)[names(ISO_pop_lactating)=="lactating"]<-"Population"   #rename column
+  
+  ISO_pop<-ISO_pop[,c("ISO", "age", "sex","Year", "Population")]
+  
+  ISO_pop_adults<- filter(ISO_pop, age >= 18, age <= 80, Year != 2019)  #as no values for birth rate exists
+  
+  ISO_pop_children<-filter(ISO_pop, age >= 1, age <= 17, Year != 2019)  #as no values for birth rate exists
+  
+  ISO_pop_infants<-filter(ISO_pop, age < 1, Year != 2019)  #as no values for birth rate exists)
+  
+  # The Average Requirement (AR) is "the level of (nutrient) intake that is adequate for half of the people in a population group,
+  # given a normal distribution of requirement" (efsa,2010).
+  # The Adequate Intake (AI) is "the value estimated when a Population Reference Intake 
+  # cannot be established because an average requirement cannot be determined. An Adequate Intake is the average observed daily level 
+  # of intake by a population group (or groups) of apparently healthy people that is assumed to be adequate" (efsa, 2010). 
+  
+  # So whenever AR is not provided, I take AI.
+  DRVs_Adults<- DRVs_Adults_orig   #for loop the original read in df needs to stay untouched
+  DRVs_Adults[DRVs_Adults == "NA"] <- NA    #set Character "NA" to NA
+  DRVs_Adults$requirement<-ifelse(is.na(DRVs_Adults$AR), DRVs_Adults$AI, DRVs_Adults$AR) #whenever AR is not provided take AI
+  DRVs_Adults<-DRVs_Adults[,c("Nutrient", "Age", "Gender", "requirement", "Target population")] #select useful
+  DRVs_Adults<-pivot_wider(DRVs_Adults, names_from = Nutrient, values_from = requirement) #from long to wide: each nutrient in seperate column
+  
+  DRVs_Children<- DRVs_Children_orig   #for loop the original read in df needs to stay untouched
+  DRVs_Children[DRVs_Children == "NA"] <- NA
+  DRVs_Children$requirement<-ifelse(is.na(DRVs_Children$AR), DRVs_Children$AI, DRVs_Children$AR)
+  DRVs_Children<-DRVs_Children[,c("Nutrient", "Age", "Gender", "requirement", "Target population")]
+  DRVs_Children<-pivot_wider(DRVs_Children, names_from = Nutrient, values_from = requirement) 
+  
+  DRVs_Infants<- DRVs_Infants_orig   #for loop the original read in df needs to stay untouched
+  DRVs_Infants[DRVs_Infants == "NA"] <- NA
+  DRVs_Infants$requirement<-ifelse(is.na(DRVs_Infants$AR), DRVs_Infants$AI, DRVs_Infants$AR)
+  DRVs_Infants<-DRVs_Infants[,c("Nutrient", "Age", "Gender", "requirement", "Target population")]
+  DRVs_Infants<-pivot_wider(DRVs_Infants, names_from = Nutrient, values_from = requirement) 
+  
+  DRVs_Lactating<- DRVs_Lactating_orig   #for loop the original read in df needs to stay untouched
+  DRVs_Lactating[DRVs_Lactating == "NA"] <- NA
+  DRVs_Lactating$requirement<-ifelse(is.na(DRVs_Lactating$AR), DRVs_Lactating$AI, DRVs_Lactating$AR)
+  DRVs_Lactating<-DRVs_Lactating[,c("Nutrient", "Age", "requirement", "Target population")]
+  DRVs_Lactating<-pivot_wider(DRVs_Lactating, names_from = Nutrient, values_from = requirement)
+  
+  DRVs_Pregnant<- DRVs_Pregnant_orig   #for loop the original read in df needs to stay untouched
+  DRVs_Pregnant[DRVs_Pregnant == "NA"] <- NA
+  DRVs_Pregnant$requirement<-ifelse(is.na(DRVs_Pregnant$AR), DRVs_Pregnant$AI, DRVs_Pregnant$AR)
+  DRVs_Pregnant<-DRVs_Pregnant[,c("Nutrient", "Age", "requirement", "Target population")]
+  DRVs_Pregnant<-pivot_wider(DRVs_Pregnant, names_from = Nutrient, values_from = requirement) 
+
+  
+#For calculation the requirement in each column need to be numeric and the header needs to be adjusted.
+
+  header_names<-c("Age", "Gender","Target population","Energy in MJ/day","Protein in g/kg bw per day", "Ca in mg/day", "Fe in mg/day", "Mg in mg/day", "Zn in mg/day", "Vit B12 in μg/day", "Folate in μg DFE/day", "Vit A in μg RE/day")   #new header names containing values
+  
+  header_names_lact_preg<-c( "Age","Target population", "Energy in MJ/day (added to normal)","Protein in g per day (added to normal)", "Ca in mg/day", "Fe in mg/day", "Mg in mg/day", "Zn in mg/day (added to normal)", "Vit B12 in μg/day", "Folate in μg DFE/day", "Vit A in μg RE/day")   #extra header, contains "Target population" col instead of "Gender" (and different order)
+  
+  colnames(DRVs_Adults)<-header_names     #Set new header
+  DRVs_Adults[,4:12] <- lapply(DRVs_Adults[,4:12], gsub, pattern = "[^[:digit:].]", replacement = "")      #extract just the digits and .
+  DRVs_Adults[,4:12] <-DRVs_Adults[,4:12] %>% mutate_if(is.character,as.numeric) #convert to numeric
+  
+  colnames(DRVs_Children)<-header_names
+  DRVs_Children[,4:12] <- lapply(DRVs_Children[,4:12], gsub, pattern = "[^[:digit:].]", replacement = "")     
+  DRVs_Children[,4:12] <-DRVs_Children[,4:12] %>% mutate_if(is.character,as.numeric)
+  
+  colnames(DRVs_Infants)<-header_names
+  DRVs_Infants[,4:12] <- lapply(DRVs_Infants[,4:12], gsub, pattern = "[^[:digit:].]", replacement = "")  
+  DRVs_Infants[,4:12] <-DRVs_Infants[,4:12] %>% mutate_if(is.character,as.numeric)
+  
+  colnames(DRVs_Lactating)<-header_names_lact_preg
+  DRVs_Lactating[,3:11] <- lapply(DRVs_Lactating[,3:11], gsub, pattern = "[^[:digit:].]", replacement = "")  
+  DRVs_Lactating[,3:11] <-DRVs_Lactating[,3:11] %>% mutate_if(is.character,as.numeric)
+  
+  colnames(DRVs_Pregnant)<-header_names_lact_preg
+  DRVs_Pregnant[,3:11] <- lapply(DRVs_Pregnant[,3:11], gsub, pattern = "[^[:digit:].]", replacement = "")  
+  DRVs_Pregnant[,3:11] <-DRVs_Pregnant[,3:11] %>% mutate_if(is.character,as.numeric)
+  
+  # ### Note on Energy 
+  # The efsa provides different energy requirements for different Physical Activty Levels (PAL) for all target groups older than one year. 
+  # To simplify the analysis, the same PAL for each country is assumed. The selection of the used PAL is noted above the Chunk.
+  # 
+  # One could refine (resp. adjust for each country) by using different labor statistics. (e.g.: Working-time: https://ilostat.ilo.org/topics/working-time/; Intressting but not checked completely, OECD Inventory of Survey Questions on the Quality of the Working Environment: https://stats.oecd.org/index.aspx; and many more)
+  # 
+  # ### Note on Protein
+  # Protein requirements are provided by bodyweight. I assume the average bodyweight to be the same, than the underlying reference bodyweight the efsa used. 
+  # 
+  # If a general adjustment of all requirements via country specific weights is done (described above), the adjustment is valid for protein as well.
+  # 
+  # ### Note on Zinc
+  # "Estimated ARs and Population Reference Intakes (PRIs) are provided for phytate intake levels [LPI] of 300, 600, 900 and 1 200 mg/day, which cover the range of mean/median intakes observed in European populations." (doi.org/10.2903/j.efsa.2014.3844)
+  # To simplify the analysis, the same LPI for each country is assumed. The selection of the used LPIs is noted above the Chunk. Mind that, with higher LPI the Zinc absorption is reduced.
+  # 
+  # ### Note on Vitamin A
+  # Vitamin A requirements are given in μg RE/day. RE means retinol equivalent. As the requirements are in the end compared with the supply, which is calculated by the Food Balance Sheets (FAO) and the Nutritional Conversion Factors (USDA) the units have to be the same. 
+  # Conversion Factors differ because the bioavailibilty of Vitamin A (which should be depicted in μg RE) was studied based on different diets (e.g. more or less leafy vegetables). 
+  # 
+  # WHO (2004)  
+  # 1 μg retinol                                = 1 μg RE  
+  # 1 μg b-carotene                             = 0.167 μg RE  
+  # 1 μg other provitamin A carotenoids         = 0.084 μg RE   
+  # 
+  # NIH/USDA (https://ods.od.nih.gov/factsheets/VitaminA-HealthProfessional/)  
+  # 1 μg retinol                                = 1 μg RE  
+  # 1 μg dietry b-carotene                      = 0.084 μg RE  
+  # 1 μg  dietary a-carotene or b-cryptoxanthin = 0.042 μg RE  
+  # 
+  # As in the overall analysis the nutritional supply (with underlying USDA units) is calculated completely separated from the nutritional requirement (with underlying efsa/who units) it is **statistically not important**.
+  # 
+  
+####INFANTS####
+  #   Infants aging 0-6 Months do not require any own nutrients as they are assumed to be fully fed by breastmilk. I thus assume that half of the infants aging 0-12 Months are actually 6-12 months, thus having own requirements. 
+  # The requirements for Infants is calculated as average over all ageclasses and for one year having 365 days.
+  # **Protein:** Protein is given in required g/bodyweight, which I don`t have atm
+  
+  #half of the infants aging 6-12 Months
+  ISO_pop_infants$Population<-ISO_pop_infants$Population/2
+  
+  #Energy
+  ISO_pop_infants<-ISO_pop_infants%>%
+    mutate(Energy_MJ= Population * mean(DRVs_Infants$`Energy in MJ/day`, na.rm = T)*365)
+  
+  #Protein
+  #Calculating weight of all infants
+  ISO_pop_infants<-ISO_pop_infants%>%
+    mutate(Pop_Weight_kg_female_1_ = ifelse(      #_1_ for later kicking column by regex
+      ISO_pop_infants$sex == "female",      #test
+      ISO_pop_infants$Population*ref_weight$Reference.weight..kg..Female[ref_weight$Age..yr.== "7-11 months"],    #yes
+      NA))
+  ISO_pop_infants<-ISO_pop_infants%>%
+    mutate(Pop_Weight_kg_male_1_ = ifelse(        #_1_ for later kicking column by regex
+      ISO_pop_infants$sex == "male",      #test
+      ISO_pop_infants$Population*ref_weight$Reference.weight..kg..Male[ref_weight$Age..yr.== "7-11 months"],    #yes
+      NA))
+  
+  #Calculating Protein
+  ISO_pop_infants<-ISO_pop_infants%>%
+    mutate(Protein_g_female_1_ = ifelse(          #_1_ for kicking out via regex later
+      ISO_pop_infants$sex == "female",      #test
+      ISO_pop_infants$Pop_Weight_kg_female_1_*DRVs_Infants$`Protein in g/kg bw per day`[DRVs_Infants$Gender== "Female" & DRVs_Infants$Age=="7-11 months"],    #yes
+      NA))         #No
+  ISO_pop_infants<-ISO_pop_infants%>%
+    mutate(Protein_g_male_1_ = ifelse(          #_1_ for kicking out via regex later
+      ISO_pop_infants$sex == "male",      #test
+      ISO_pop_infants$Pop_Weight_kg_male_1_*DRVs_Infants$`Protein in g/kg bw per day`[DRVs_Infants$Gender== "Male" & DRVs_Infants$Age=="7-11 months"],    #yes
+      NA))         #No
+  
+  ISO_pop_infants$Protein_g<-rowSums(ISO_pop_infants[,c("Protein_g_male_1_","Protein_g_female_1_")], na.rm = T)    #to one column
+  ISO_pop_infants$Protein_g<-ISO_pop_infants$Protein_g*365
+  sum(ISO_pop_infants$Protein_g== 0) #check if each year is calculated
+  
+  #Calcium
+  ISO_pop_infants<-ISO_pop_infants%>%
+    mutate(Ca_mg=Population * mean(DRVs_Infants$`Ca in mg/day`, na.rm = T)*365)
+  
+  #Iron
+  ISO_pop_infants<-ISO_pop_infants%>%
+    mutate(Fe_mg=Population * mean(DRVs_Infants$`Fe in mg/day`, na.rm = T)*365)
+  
+  #Magnesium
+  ISO_pop_infants<-ISO_pop_infants%>%
+    mutate(Mg_mg=Population * mean(DRVs_Infants$`Mg in mg/day`, na.rm = T)*365)
+  
+  #Zinc
+  ISO_pop_infants<-ISO_pop_infants%>%
+    mutate(Zn_mg=Population * mean(DRVs_Infants$`Zn in mg/day`, na.rm = T)*365)
+  
+  #Vitamin B12
+  ISO_pop_infants<-ISO_pop_infants%>%
+    mutate(Vit_B12_μg =Population * mean(DRVs_Infants$`Vit B12 in μg/day`, na.rm = T)*365)
+  
+  #Folate
+  ISO_pop_infants<-ISO_pop_infants%>%
+    mutate(Folate_μg_DFE =Population * mean(DRVs_Infants$`Folate in μg DFE/day`, na.rm = T)*365)
+  
+  #Vitamin A
+  ISO_pop_infants<-ISO_pop_infants%>%
+    mutate(Vit_A_μg_RE =Population * mean(DRVs_Infants$`Vit A in μg RE/day`, na.rm = T)*365)
+  
+  
+  #remove all columns with digits and _ as they are just intermediate results
+  ISO_pop_infants<-ISO_pop_infants%>% select(-matches("_\\d+_"))
+  
+  
+####CHILDREN####
+  # **Energy:** For persons older than 3 years, the efsa provides requirements 
+  #             for different physical activity levels (PAL). (median value or one higher)
+  # **Protein:**     As reference weights are not provided in finer scale, the protein requirements are calculated by taking the mean of the requirements of the relevant age groups. 
+  
+  #ENERGY 
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_1_male=ifelse(
+      ISO_pop_children$age== 1 & ISO_pop_children$sex== "male",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "1 year PAL=1.4" & DRVs_Children$Gender=="Male"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_2_male=ifelse(
+      ISO_pop_children$age== 2 & ISO_pop_children$sex== "male",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "2 years PAL=1.4" & DRVs_Children$Gender=="Male"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_3_male=ifelse(
+      ISO_pop_children$age== 3 & ISO_pop_children$sex== "male",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "3 years PAL=1.4" & DRVs_Children$Gender=="Male"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_4_male=ifelse(
+      ISO_pop_children$age== 4 & ISO_pop_children$sex== "male",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "4 years PAL=1.6" & DRVs_Children$Gender=="Male"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_5_male=ifelse(
+      ISO_pop_children$age== 5 & ISO_pop_children$sex== "male",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "5 years PAL=1.6" & DRVs_Children$Gender=="Male"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_6_male=ifelse(
+      ISO_pop_children$age== 6 & ISO_pop_children$sex== "male",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "6 years PAL=1.6" & DRVs_Children$Gender=="Male"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_7_male=ifelse(
+      ISO_pop_children$age== 7 & ISO_pop_children$sex== "male",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "7 years PAL=1.6" & DRVs_Children$Gender=="Male"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_8_male=ifelse(
+      ISO_pop_children$age== 8 & ISO_pop_children$sex== "male",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "8 years PAL=1.6" & DRVs_Children$Gender=="Male"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_9_male=ifelse(
+      ISO_pop_children$age== 9 & ISO_pop_children$sex== "male",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "9 years PAL=1.6" & DRVs_Children$Gender=="Male"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_10_male=ifelse(
+      ISO_pop_children$age== 10 & ISO_pop_children$sex== "male",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "10 years PAL=1.8" & DRVs_Children$Gender=="Male"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_11_male=ifelse(
+      ISO_pop_children$age== 11 & ISO_pop_children$sex== "male",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "11 years PAL=1.8" & DRVs_Children$Gender=="Male"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_12_male=ifelse(
+      ISO_pop_children$age== 12 & ISO_pop_children$sex== "male",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "12 years PAL=1.8" & DRVs_Children$Gender=="Male"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_13_male=ifelse(
+      ISO_pop_children$age== 13 & ISO_pop_children$sex== "male",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "13 years PAL=1.8" & DRVs_Children$Gender=="Male"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_14_male=ifelse(
+      ISO_pop_children$age== 14 & ISO_pop_children$sex== "male",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "14 years PAL=1.8" & DRVs_Children$Gender=="Male"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_15_male=ifelse(
+      ISO_pop_children$age== 15 & ISO_pop_children$sex== "male",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "15 years PAL=1.8" & DRVs_Children$Gender=="Male"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_16_male=ifelse(
+      ISO_pop_children$age== 16 & ISO_pop_children$sex== "male",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "16 years PAL=1.8" & DRVs_Children$Gender=="Male"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_17_male=ifelse(
+      ISO_pop_children$age== 17 & ISO_pop_children$sex== "male",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "17 years PAL=1.8" & DRVs_Children$Gender=="Male"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_1_female=ifelse(
+      ISO_pop_children$age== 1 & ISO_pop_children$sex== "female",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "1 year PAL=1.4" & DRVs_Children$Gender=="Female"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_2_female=ifelse(
+      ISO_pop_children$age== 2 & ISO_pop_children$sex== "female",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "2 years PAL=1.4" & DRVs_Children$Gender=="Female"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_3_female=ifelse(
+      ISO_pop_children$age== 3 & ISO_pop_children$sex== "female",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "3 years PAL=1.4" & DRVs_Children$Gender=="Female"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_4_female=ifelse(
+      ISO_pop_children$age== 4 & ISO_pop_children$sex== "female",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "4 years PAL=1.6" & DRVs_Children$Gender=="Female"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_5_female=ifelse(
+      ISO_pop_children$age== 5 & ISO_pop_children$sex== "female",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "5 years PAL=1.6" & DRVs_Children$Gender=="Female"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_6_female=ifelse(
+      ISO_pop_children$age== 6 & ISO_pop_children$sex== "female",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "6 years PAL=1.6" & DRVs_Children$Gender=="Female"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_7_female=ifelse(
+      ISO_pop_children$age== 7 & ISO_pop_children$sex== "female",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "7 years PAL=1.6" & DRVs_Children$Gender=="Female"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_8_female=ifelse(
+      ISO_pop_children$age== 8 & ISO_pop_children$sex== "female",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "8 years PAL=1.6" & DRVs_Children$Gender=="Female"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_9_female=ifelse(
+      ISO_pop_children$age== 9 & ISO_pop_children$sex== "female",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "9 years PAL=1.6" & DRVs_Children$Gender=="Female"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_10_female=ifelse(
+      ISO_pop_children$age== 10 & ISO_pop_children$sex== "female",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "10 years PAL=1.8" & DRVs_Children$Gender=="Female"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_11_female=ifelse(
+      ISO_pop_children$age== 11 & ISO_pop_children$sex== "female",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "11 years PAL=1.8" & DRVs_Children$Gender=="Female"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_12_female=ifelse(
+      ISO_pop_children$age== 12 & ISO_pop_children$sex== "female",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "12 years PAL=1.8" & DRVs_Children$Gender=="Female"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_13_female=ifelse(
+      ISO_pop_children$age== 13 & ISO_pop_children$sex== "female",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "13 years PAL=1.8" & DRVs_Children$Gender=="Female"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_14_female=ifelse(
+      ISO_pop_children$age== 14 & ISO_pop_children$sex== "female",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "14 years PAL=1.8" & DRVs_Children$Gender=="Female"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_15_female=ifelse(
+      ISO_pop_children$age== 15 & ISO_pop_children$sex== "female",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "15 years PAL=1.8" & DRVs_Children$Gender=="Female"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_16_female=ifelse(
+      ISO_pop_children$age== 16 & ISO_pop_children$sex== "female",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "16 years PAL=1.8" & DRVs_Children$Gender=="Female"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Energy_MJ_17_female=ifelse(
+      ISO_pop_children$age== 17 & ISO_pop_children$sex== "female",     #test
+      ISO_pop_children$Population*DRVs_Children$`Energy in MJ/day`[DRVs_Children$Age == "17 years PAL=1.8" & DRVs_Children$Gender=="Female"], #yes
+      NA))  #no
+  
+  ISO_pop_children$Energy_MJ<-rowSums(ISO_pop_children[,c("Energy_MJ_1_female","Energy_MJ_2_female", "Energy_MJ_3_female", "Energy_MJ_4_female","Energy_MJ_5_female","Energy_MJ_6_female","Energy_MJ_7_female", "Energy_MJ_8_female", "Energy_MJ_9_female","Energy_MJ_10_female","Energy_MJ_11_female","Energy_MJ_12_female","Energy_MJ_13_female", "Energy_MJ_14_female", "Energy_MJ_15_female","Energy_MJ_16_female","Energy_MJ_17_female","Energy_MJ_1_male","Energy_MJ_2_male", "Energy_MJ_3_male", "Energy_MJ_4_male","Energy_MJ_5_male","Energy_MJ_6_male","Energy_MJ_7_male", "Energy_MJ_8_male", "Energy_MJ_9_male","Energy_MJ_10_male","Energy_MJ_11_male","Energy_MJ_12_male","Energy_MJ_13_male", "Energy_MJ_14_male", "Energy_MJ_15_male","Energy_MJ_16_male","Energy_MJ_17_male")], na.rm = T)    #to one column
+  ISO_pop_children$Energy_MJ<-ISO_pop_children$Energy_MJ*365
+  sum(ISO_pop_children$Energy_MJ== 0) #check if each year is calculated
+  
+  #PROTEIN
+  #Calculating weight of all Children
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Pop_Weight_kg_female_1_3 = ifelse(     
+      ISO_pop_children$sex == "female" & ISO_pop_children$age%in% 1:3,      #test
+      ISO_pop_children$Population*ref_weight$Reference.weight..kg..Female[ref_weight$Age..yr.== "1-3"],    #yes
+      NA))
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Pop_Weight_kg_female_4_6 = ifelse(     
+      ISO_pop_children$sex == "female" & ISO_pop_children$age%in% 4:6,      #test
+      ISO_pop_children$Population*ref_weight$Reference.weight..kg..Female[ref_weight$Age..yr.== "4-6"],    #yes
+      NA))
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Pop_Weight_kg_female_7_10 = ifelse(     
+      ISO_pop_children$sex == "female" & ISO_pop_children$age%in% 7:10,      #test
+      ISO_pop_children$Population*ref_weight$Reference.weight..kg..Female[ref_weight$Age..yr.== "7-10"],    #yes
+      NA))
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Pop_Weight_kg_female_11_14 = ifelse(     
+      ISO_pop_children$sex == "female" & ISO_pop_children$age%in% 11:14,      #test
+      ISO_pop_children$Population*ref_weight$Reference.weight..kg..Female[ref_weight$Age..yr.== "11-14"],    #yes
+      NA))
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Pop_Weight_kg_female_15_17 = ifelse(     
+      ISO_pop_children$sex == "female" & ISO_pop_children$age%in% 15:17,      #test
+      ISO_pop_children$Population*ref_weight$Reference.weight..kg..Female[ref_weight$Age..yr.== "15-17"],    #yes
+      NA))
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Pop_Weight_kg_male_1_3 = ifelse(     
+      ISO_pop_children$sex == "male" & ISO_pop_children$age%in% 1:3,      #test
+      ISO_pop_children$Population*ref_weight$Reference.weight..kg..Male[ref_weight$Age..yr.== "1-3"],    #yes
+      NA))
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Pop_Weight_kg_male_4_6 = ifelse(     
+      ISO_pop_children$sex == "male" & ISO_pop_children$age%in% 4:6,      #test
+      ISO_pop_children$Population*ref_weight$Reference.weight..kg..Male[ref_weight$Age..yr.== "4-6"],    #yes
+      NA))
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Pop_Weight_kg_male_7_10 = ifelse(     
+      ISO_pop_children$sex == "male" & ISO_pop_children$age%in% 7:10,      #test
+      ISO_pop_children$Population*ref_weight$Reference.weight..kg..Male[ref_weight$Age..yr.== "7-10"],    #yes
+      NA))
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Pop_Weight_kg_male_11_14 = ifelse(     
+      ISO_pop_children$sex == "male" & ISO_pop_children$age%in% 11:14,      #test
+      ISO_pop_children$Population*ref_weight$Reference.weight..kg..Male[ref_weight$Age..yr.== "11-14"],    #yes
+      NA))
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Pop_Weight_kg_male_15_17 = ifelse(     
+      ISO_pop_children$sex == "male" & ISO_pop_children$age%in% 15:17,      #test
+      ISO_pop_children$Population*ref_weight$Reference.weight..kg..Male[ref_weight$Age..yr.== "15-17"],    #yes
+      NA))
+  
+  #Calculating Protein
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Protein_g_female_1_3 = ifelse(          
+      ISO_pop_children$sex == "female"& ISO_pop_children$age%in%1:3,      #test
+      ISO_pop_children$Pop_Weight_kg_female_1_3*mean           #mean of values link via OR
+      (DRVs_Children$`Protein in g/kg bw per day`
+        [DRVs_Children$Gender== "Female" & DRVs_Children$Age=="12-17 months" |DRVs_Children$Gender== "Female" & DRVs_Children$Age=="18-23 months" |DRVs_Children$Gender== "Female" & DRVs_Children$Age=="2 years"
+          |DRVs_Children$Gender== "Female" & DRVs_Children$Age=="3 years"]),    #yes
+      NA))         #No
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Protein_g_female_4_6 = ifelse(          
+      ISO_pop_children$sex == "female"& ISO_pop_children$age%in%4:6,      #test
+      ISO_pop_children$Pop_Weight_kg_female_4_6*mean           #mean of values link via OR
+      (DRVs_Children$`Protein in g/kg bw per day`
+        [DRVs_Children$Gender== "Female" & DRVs_Children$Age=="4 years" 
+          |DRVs_Children$Gender== "Female" & DRVs_Children$Age=="5 years"
+          |DRVs_Children$Gender== "Female" & DRVs_Children$Age=="6 years"]),    #yes
+      NA))         #No
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Protein_g_female_7_10 = ifelse(          
+      ISO_pop_children$sex == "female"& ISO_pop_children$age%in%7:10,      #test
+      ISO_pop_children$Pop_Weight_kg_female_7_10*mean          #mean of values link via OR
+      (DRVs_Children$`Protein in g/kg bw per day`
+        [DRVs_Children$Gender== "Female" & DRVs_Children$Age=="7 years" 
+          |DRVs_Children$Gender== "Female" & DRVs_Children$Age=="8 years"
+          |DRVs_Children$Gender== "Female" & DRVs_Children$Age=="9 years"
+          |DRVs_Children$Gender== "Female" & DRVs_Children$Age=="10 years"]),    #yes
+      NA))         #No
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Protein_g_female_11_14 = ifelse(          
+      ISO_pop_children$sex == "female"& ISO_pop_children$age%in%11:14,      #test
+      ISO_pop_children$Pop_Weight_kg_female_11_14*mean         #mean of values link via OR
+      (DRVs_Children$`Protein in g/kg bw per day`
+        [DRVs_Children$Gender== "Female" & DRVs_Children$Age=="11 years" 
+          |DRVs_Children$Gender== "Female" & DRVs_Children$Age=="12 years"
+          |DRVs_Children$Gender== "Female" & DRVs_Children$Age=="13 years"
+          |DRVs_Children$Gender== "Female" & DRVs_Children$Age=="14 years"]),    #yes
+      NA))         #No
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Protein_g_female_15_17 = ifelse(          
+      ISO_pop_children$sex == "female"& ISO_pop_children$age%in%15:17,      #test
+      ISO_pop_children$Pop_Weight_kg_female_15_17*mean      #mean of values link via OR
+      (DRVs_Children$`Protein in g/kg bw per day`
+        [DRVs_Children$Gender== "Female" & DRVs_Children$Age=="15 years" 
+          |DRVs_Children$Gender== "Female" & DRVs_Children$Age=="16 years"
+          |DRVs_Children$Gender== "Female" & DRVs_Children$Age=="17 years"]),    #yes
+      NA))         #No
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Protein_g_male_1_3 = ifelse(          
+      ISO_pop_children$sex == "male"& ISO_pop_children$age%in%1:3,      #test
+      ISO_pop_children$Pop_Weight_kg_male_1_3*mean           #mean of values link via OR
+      (DRVs_Children$`Protein in g/kg bw per day`
+        [DRVs_Children$Gender== "Male" & DRVs_Children$Age=="12-17 months" |DRVs_Children$Gender== "Male" & DRVs_Children$Age=="18-23 months" |DRVs_Children$Gender== "Male" & DRVs_Children$Age=="2 years"
+          |DRVs_Children$Gender== "Male" & DRVs_Children$Age=="3 years"]),    #yes
+      NA))         #No
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Protein_g_male_4_6 = ifelse(          
+      ISO_pop_children$sex == "male"& ISO_pop_children$age%in%4:6,      #test
+      ISO_pop_children$Pop_Weight_kg_male_4_6*mean           #mean of values link via OR
+      (DRVs_Children$`Protein in g/kg bw per day`
+        [DRVs_Children$Gender== "Male" & DRVs_Children$Age=="4 years" 
+          |DRVs_Children$Gender== "Male" & DRVs_Children$Age=="5 years"
+          |DRVs_Children$Gender== "Male" & DRVs_Children$Age=="6 years"]),    #yes
+      NA))         #No
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Protein_g_male_7_10 = ifelse(          
+      ISO_pop_children$sex == "male"& ISO_pop_children$age%in%7:10,      #test
+      ISO_pop_children$Pop_Weight_kg_male_7_10*mean          #mean of values link via OR
+      (DRVs_Children$`Protein in g/kg bw per day`
+        [DRVs_Children$Gender== "Male" & DRVs_Children$Age=="7 years" 
+          |DRVs_Children$Gender== "Male" & DRVs_Children$Age=="8 years"
+          |DRVs_Children$Gender== "Male" & DRVs_Children$Age=="9 years"
+          |DRVs_Children$Gender== "Male" & DRVs_Children$Age=="10 years"]),    #yes
+      NA))         #No
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Protein_g_male_11_14 = ifelse(          
+      ISO_pop_children$sex == "male"& ISO_pop_children$age%in%11:14,      #test
+      ISO_pop_children$Pop_Weight_kg_male_11_14*mean         #mean of values link via OR
+      (DRVs_Children$`Protein in g/kg bw per day`
+        [DRVs_Children$Gender== "Male" & DRVs_Children$Age=="11 years" 
+          |DRVs_Children$Gender== "Male" & DRVs_Children$Age=="12 years"
+          |DRVs_Children$Gender== "Male" & DRVs_Children$Age=="13 years"
+          |DRVs_Children$Gender== "Male" & DRVs_Children$Age=="14 years"]),    #yes
+      NA))         #No
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Protein_g_male_15_17 = ifelse(          
+      ISO_pop_children$sex == "male"& ISO_pop_children$age%in%15:17,      #test
+      ISO_pop_children$Pop_Weight_kg_male_15_17*mean      #mean of values link via OR
+      (DRVs_Children$`Protein in g/kg bw per day`
+        [DRVs_Children$Gender== "Male" & DRVs_Children$Age=="15 years" 
+          |DRVs_Children$Gender== "Male" & DRVs_Children$Age=="16 years"
+          |DRVs_Children$Gender== "Male" & DRVs_Children$Age=="17 years"]),    #yes
+      NA))         #No
+  
+  
+  ISO_pop_children$Protein_g<-rowSums(ISO_pop_children[,c("Protein_g_male_15_17","Protein_g_male_11_14", "Protein_g_male_7_10", "Protein_g_male_4_6","Protein_g_male_1_3", "Protein_g_female_15_17","Protein_g_female_11_14", "Protein_g_female_7_10", "Protein_g_female_4_6","Protein_g_female_1_3")], na.rm = T)    #to one column
+  ISO_pop_children$Protein_g<-ISO_pop_children$Protein_g*365
+  sum(ISO_pop_children$Protein_g== 0) #check if each year is calculated
+  
+  
+  #CALCIUM
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Ca_mg_1_3=ifelse(
+      ISO_pop_children$age%in% 1:3,     #test
+      ISO_pop_children$Population*DRVs_Children$`Ca in mg/day`[DRVs_Children$Age == "1-3 years"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Ca_mg_4_10=ifelse(
+      ISO_pop_children$age%in% 4:10,     #test
+      ISO_pop_children$Population*DRVs_Children$`Ca in mg/day`[DRVs_Children$Age == "4-10 years"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Ca_mg_11_17=ifelse(
+      ISO_pop_children$age%in% 11:17,     #test
+      ISO_pop_children$Population*DRVs_Children$`Ca in mg/day`[DRVs_Children$Age == "11-17 years"], #yes
+      NA))  #no
+  
+  ISO_pop_children$Ca_mg<-rowSums(ISO_pop_children[,c("Ca_mg_11_17","Ca_mg_4_10", "Ca_mg_1_3")], na.rm = T)    #to one column
+  ISO_pop_children$Ca_mg<-ISO_pop_children$Ca_mg*365
+  sum(ISO_pop_children$Ca_mg== 0) #check if each year is calculated
+  
+  
+  #IRON
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Fe_mg_1_6=ifelse(
+      ISO_pop_children$age%in% 1:6,     #test
+      ISO_pop_children$Population*DRVs_Children$`Fe in mg/day`[DRVs_Children$Age == "1-6 years"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Fe_mg_7_11=ifelse(
+      ISO_pop_children$age%in% 7:11,     #test
+      ISO_pop_children$Population*DRVs_Children$`Fe in mg/day`[DRVs_Children$Age == "7-11 years"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Fe_mg_12_17_male=ifelse(
+      ISO_pop_children$age%in% 12:17 & ISO_pop_children$sex == "male",     #test
+      ISO_pop_children$Population*DRVs_Children$`Fe in mg/day`[DRVs_Children$Age == "12-17 years" & DRVs_Children$Gender == "Male"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Fe_mg_12_17_female=ifelse(
+      ISO_pop_children$age%in% 12:17 & ISO_pop_children$sex == "female",     #test
+      ISO_pop_children$Population*DRVs_Children$`Fe in mg/day`[DRVs_Children$Age == "12-17 years" & DRVs_Children$Gender == "Female" ], #yes
+      NA))  #no
+  
+  ISO_pop_children$Fe_mg<-rowSums(ISO_pop_children[,c("Fe_mg_12_17_female","Fe_mg_12_17_male", "Fe_mg_7_11", "Fe_mg_1_6")], na.rm = T)    #to one column
+  sum(ISO_pop_children$Fe_mg== 0) #check if each year is calculated
+  
+  #MAGNESIUM
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Mg_mg_1_2 =ifelse(
+      ISO_pop_children$age%in% 1:2,     #test
+      ISO_pop_children$Population*DRVs_Children$`Mg in mg/day`[DRVs_Children$Age == "1-2 years"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Mg_mg_3_3 =ifelse(
+      ISO_pop_children$age==3,     #test
+      ISO_pop_children$Population*DRVs_Children$`Mg in mg/day`[DRVs_Children$Age == "4-9 years"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Mg_mg_4_9 =ifelse(
+      ISO_pop_children$age%in% 4:9,     #test
+      ISO_pop_children$Population*DRVs_Children$`Mg in mg/day`[DRVs_Children$Age == "4-9 years"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Mg_mg_10_17_male =ifelse(
+      ISO_pop_children$age%in% 10:17 & ISO_pop_children$sex == "male",     #test
+      ISO_pop_children$Population*DRVs_Children$`Mg in mg/day`[DRVs_Children$Age == "10-17 years" & DRVs_Children$Gender == "Male"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Mg_mg_10_17_female =ifelse(
+      ISO_pop_children$age%in% 10:17 & ISO_pop_children$sex == "female",     #test
+      ISO_pop_children$Population*DRVs_Children$`Mg in mg/day`[DRVs_Children$Age == "10-17 years" & DRVs_Children$Gender == "Female" ], #yes
+      NA))  #no
+  
+  ISO_pop_children$Mg_mg<-rowSums(ISO_pop_children[,c("Mg_mg_10_17_female","Mg_mg_10_17_male", "Mg_mg_4_9", "Mg_mg_3_3","Mg_mg_1_2")], na.rm = T)    #to one column
+  ISO_pop_children$Mg_mg<-ISO_pop_children$Mg_mg*365
+  sum(ISO_pop_children$Mg_mg== 0) #check if each year is calculated
+  
+  #ZINC
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Zn_mg_1_3 =ifelse(
+      ISO_pop_children$age%in% 1:3,     #test
+      ISO_pop_children$Population*DRVs_Children$`Zn in mg/day`[DRVs_Children$Age == "1-3 years"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Zn_mg_4_6 =ifelse(
+      ISO_pop_children$age%in% 4:6,     #test
+      ISO_pop_children$Population*DRVs_Children$`Zn in mg/day`[DRVs_Children$Age == "4-6 years"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Zn_mg_7_10 =ifelse(
+      ISO_pop_children$age%in% 7:10,     #test
+      ISO_pop_children$Population*DRVs_Children$`Zn in mg/day`[DRVs_Children$Age == "7-10 years"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Zn_mg_11_14 =ifelse(
+      ISO_pop_children$age%in% 11:14,     #test
+      ISO_pop_children$Population*DRVs_Children$`Zn in mg/day`[DRVs_Children$Age == "11-14 years"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Zn_mg_15_17_male =ifelse(
+      ISO_pop_children$age%in% 15:17 & ISO_pop_children$sex == "male",     #test
+      ISO_pop_children$Population*DRVs_Children$`Zn in mg/day`[DRVs_Children$Age == "15-17 years" & DRVs_Children$Gender == "Male"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Zn_mg_15_17_female =ifelse(
+      ISO_pop_children$age%in% 15:17 & ISO_pop_children$sex == "female",     #test
+      ISO_pop_children$Population*DRVs_Children$`Zn in mg/day`[DRVs_Children$Age == "15-17 years" & DRVs_Children$Gender == "Female"], #yes
+      NA))  #no
+  
+  ISO_pop_children$Zn_mg<-rowSums(ISO_pop_children[,c("Zn_mg_15_17_male","Zn_mg_15_17_female", "Zn_mg_11_14", "Zn_mg_7_10","Zn_mg_4_6", "Zn_mg_1_3")], na.rm = T)    #to one column
+  ISO_pop_children$Zn_mg<-ISO_pop_children$Zn_mg*365
+  sum(ISO_pop_children$Zn_mg== 0) #check if each year is calculated
+  
+  # VITAMIN B12
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Vit_B12_μg_1_3 =ifelse(
+      ISO_pop_children$age%in% 1:3,     #test
+      ISO_pop_children$Population*DRVs_Children$`Vit B12 in μg/day`[DRVs_Children$Age == "1-3 years"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Vit_B12_μg_4_6 =ifelse(
+      ISO_pop_children$age%in% 4:6,     #test
+      ISO_pop_children$Population*DRVs_Children$`Vit B12 in μg/day`[DRVs_Children$Age == "4-6 years"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Vit_B12_μg_7_10 =ifelse(
+      ISO_pop_children$age%in% 7:10,     #test
+      ISO_pop_children$Population*DRVs_Children$`Vit B12 in μg/day`[DRVs_Children$Age == "7-10 years"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Vit_B12_μg_11_14 =ifelse(
+      ISO_pop_children$age%in% 11:14,     #test
+      ISO_pop_children$Population*DRVs_Children$`Vit B12 in μg/day`[DRVs_Children$Age == "11-14 years"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Vit_B12_μg_15_17 =ifelse(
+      ISO_pop_children$age%in% 15:17,     #test
+      ISO_pop_children$Population*DRVs_Children$`Vit B12 in μg/day`[DRVs_Children$Age == "15-17 years"& DRVs_Children$Gender == "Both genders"], #yes
+      NA))  #no
+  
+  ISO_pop_children$Vit_B12_μg<-rowSums(ISO_pop_children[,c("Vit_B12_μg_15_17","Vit_B12_μg_11_14", "Vit_B12_μg_7_10", "Vit_B12_μg_4_6","Vit_B12_μg_1_3")], na.rm = T)    #to one column
+  ISO_pop_children$Vit_B12_μg<-ISO_pop_children$Vit_B12_μg *365
+  sum(ISO_pop_children$Vit_B12_μg== 0) #check if each year is calculated
+  
+  
+  #FOLATE 
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Folate_μg_DFE_1_3 =ifelse(
+      ISO_pop_children$age%in% 1:3,     #test
+      ISO_pop_children$Population*DRVs_Children$`Folate in μg DFE/day`[DRVs_Children$Age == "1-3 years"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Folate_μg_DFE_4_6 =ifelse(
+      ISO_pop_children$age%in% 4:6,     #test
+      ISO_pop_children$Population*DRVs_Children$`Folate in μg DFE/day`[DRVs_Children$Age == "4-6 years"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Folate_μg_DFE_7_10 =ifelse(
+      ISO_pop_children$age%in% 7:10,     #test
+      ISO_pop_children$Population*DRVs_Children$`Folate in μg DFE/day`[DRVs_Children$Age == "7-10 years"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Folate_μg_DFE_11_14 =ifelse(
+      ISO_pop_children$age%in% 11:14,     #test
+      ISO_pop_children$Population*DRVs_Children$`Folate in μg DFE/day`[DRVs_Children$Age == "11-14 years"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Folate_μg_DFE_15_17 =ifelse(
+      ISO_pop_children$age%in% 15:17,     #test
+      ISO_pop_children$Population*DRVs_Children$`Folate in μg DFE/day`[DRVs_Children$Age == "15-17 years"& DRVs_Children$Gender == "Both genders"], #yes
+      NA))  #no
+  ISO_pop_children$Folate_μg_DFE<-rowSums(ISO_pop_children[,c("Folate_μg_DFE_1_3","Folate_μg_DFE_4_6", "Folate_μg_DFE_7_10", "Folate_μg_DFE_11_14","Folate_μg_DFE_15_17")], na.rm = T)
+  ISO_pop_children$Folate_μg_DFE<-ISO_pop_children$Folate_μg_DFE*365
+  sum(ISO_pop_children$Folate_μg_DFE== 0) #check if each year is calculated
+  
+  # VITAMIN A
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Vit_A_μg_RE_1_3 =ifelse(
+      ISO_pop_children$age%in% 1:3,     #test
+      ISO_pop_children$Population*DRVs_Children$`Vit A in μg RE/day`[DRVs_Children$Age == "1-3 years"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Vit_A_μg_RE_4_6 =ifelse(
+      ISO_pop_children$age%in% 4:6,     #test
+      ISO_pop_children$Population*DRVs_Children$`Vit A in μg RE/day`[DRVs_Children$Age == "4-6 years"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Vit_A_μg_RE_7_10 =ifelse(
+      ISO_pop_children$age%in% 7:10,     #test
+      ISO_pop_children$Population*DRVs_Children$`Vit A in μg RE/day`[DRVs_Children$Age == "7-10 years"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Vit_A_μg_RE_11_14 =ifelse(
+      ISO_pop_children$age%in% 11:14,     #test
+      ISO_pop_children$Population*DRVs_Children$`Vit A in μg RE/day`[DRVs_Children$Age == "11-14 years"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Vit_A_μg_RE_15_17_male =ifelse(
+      ISO_pop_children$age%in% 15:17 & ISO_pop_children$sex == "male",     #test
+      ISO_pop_children$Population*DRVs_Children$`Vit A in μg RE/day`[DRVs_Children$Age == "15-17 years"& DRVs_Children$Gender == "Male"], #yes
+      NA))  #no
+  ISO_pop_children<-ISO_pop_children%>%
+    mutate(Vit_A_μg_RE_15_17_female =ifelse(
+      ISO_pop_children$age%in% 15:17 & ISO_pop_children$sex == "female",     #test
+      ISO_pop_children$Population*DRVs_Children$`Vit A in μg RE/day`[DRVs_Children$Age == "15-17 years"& DRVs_Children$Gender == "Female"], #yes
+      NA))  #no
+  ISO_pop_children$Vit_A_μg_RE<-rowSums(ISO_pop_children[,c("Vit_A_μg_RE_15_17_female","Vit_A_μg_RE_15_17_male","Vit_A_μg_RE_11_14", "Vit_A_μg_RE_7_10", "Vit_A_μg_RE_4_6","Vit_A_μg_RE_1_3")], na.rm = T)    #to one column
+  ISO_pop_children$Vit_A_μg_RE<-ISO_pop_children$Vit_A_μg_RE*365
+  sum(ISO_pop_children$Vit_A_μg_RE== 0) #check if each year is calculated
+  
+  #remove all columns with digits and _ as they are just intermediate results
+  ISO_pop_children<-ISO_pop_children%>% select(-matches("_\\d+_")) 
+  
+
+  
+####ADULTS####
+  # **Menopause:** The menopause (the beginning of absence of menstruation), 
+  # the  is asssumed to be at age of 50. 
+  # (https://oxfordre.com/publichealth/view/10.1093/acrefore/9780190632366.001.0001/acrefore-9780190632366-e-176)  
+  # **Energy:** The efsa provides requirements for different physical activity levels (PAL).  
+  # **Zinc:** The efsa provides requirements for four levels of phytate intake (LPI): 300, 600, 900 and 1,200 mg/day
+  #ENERGY 
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Energy_MJ_18_29_female = ifelse(
+      ISO_pop_adults$age%in%18:29  & ISO_pop_adults$sex== "female",     #test
+      ISO_pop_adults$Population*DRVs_Adults$`Energy in MJ/day`[DRVs_Adults$Age == "18–29 years PAL=1.8" & DRVs_Adults$Gender=="Female"], #yes
+      NA))  #no
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Energy_MJ_30_39_female=ifelse(
+      ISO_pop_adults$age%in%30:39  & ISO_pop_adults$sex== "female",     #test
+      ISO_pop_adults$Population*DRVs_Adults$`Energy in MJ/day`[DRVs_Adults$Age == "30–39 years PAL=1.8" & DRVs_Adults$Gender=="Female"], #yes
+      NA))  #no
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Energy_MJ_40_49_female=ifelse(
+      ISO_pop_adults$age%in%40:49 & ISO_pop_adults$sex== "female",     #test
+      ISO_pop_adults$Population*DRVs_Adults$`Energy in MJ/day`[DRVs_Adults$Age == "40–49 years PAL=1.8" & DRVs_Adults$Gender=="Female"], #yes
+      NA))  #no
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Energy_MJ_50_59_female=ifelse(
+      ISO_pop_adults$age%in%50:59 & ISO_pop_adults$sex== "female",     #test
+      ISO_pop_adults$Population*DRVs_Adults$`Energy in MJ/day`[DRVs_Adults$Age == "50–59 years PAL=1.8" & DRVs_Adults$Gender=="Female"], #yes
+      NA))  #no
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Energy_MJ_60_69_female=ifelse(
+      ISO_pop_adults$age%in%60:69 & ISO_pop_adults$sex== "female",     #test
+      ISO_pop_adults$Population*DRVs_Adults$`Energy in MJ/day`[DRVs_Adults$Age == "60–69 years PAL=1.8" & DRVs_Adults$Gender=="Female"], #yes
+      NA))  #no
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Energy_MJ_70_79_female=ifelse(
+      ISO_pop_adults$age%in%70:79 & ISO_pop_adults$sex== "female",     #test
+      ISO_pop_adults$Population*DRVs_Adults$`Energy in MJ/day`[DRVs_Adults$Age == "70–79 years PAL=1.8" & DRVs_Adults$Gender=="Female"], #yes
+      NA))  #no
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Energy_MJ_80_female=ifelse(
+      ISO_pop_adults$age%in%80 & ISO_pop_adults$sex== "female",     #test
+      ISO_pop_adults$Population*DRVs_Adults$`Energy in MJ/day`[DRVs_Adults$Age == "70–79 years PAL=1.6" & DRVs_Adults$Gender=="Female"], #yes
+      NA))  #no
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Energy_MJ_18_29_male=ifelse(
+      ISO_pop_adults$age%in%18:29  & ISO_pop_adults$sex== "male",     #test
+      ISO_pop_adults$Population*DRVs_Adults$`Energy in MJ/day`[DRVs_Adults$Age == "18–29 years PAL=1.8" & DRVs_Adults$Gender=="Male"], #yes
+      NA))  #no
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Energy_MJ_30_39_male=ifelse(
+      ISO_pop_adults$age%in%30:39  & ISO_pop_adults$sex== "male",     #test
+      ISO_pop_adults$Population*DRVs_Adults$`Energy in MJ/day`[DRVs_Adults$Age == "30–39 years PAL=1.8" & DRVs_Adults$Gender=="Male"], #yes
+      NA))  #no
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Energy_MJ_40_49_male=ifelse(
+      ISO_pop_adults$age%in%40:49 & ISO_pop_adults$sex== "male",     #test
+      ISO_pop_adults$Population*DRVs_Adults$`Energy in MJ/day`[DRVs_Adults$Age == "40–49 year PAL=1.8" & DRVs_Adults$Gender=="Male"], #yes
+      NA))  #no
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Energy_MJ_50_59_male=ifelse(
+      ISO_pop_adults$age%in%50:59 & ISO_pop_adults$sex== "male",     #test
+      ISO_pop_adults$Population*DRVs_Adults$`Energy in MJ/day`[DRVs_Adults$Age == "50–59 years PAL=1.8" & DRVs_Adults$Gender=="Male"], #yes
+      NA))  #no
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Energy_MJ_60_69_male=ifelse(
+      ISO_pop_adults$age%in%60:69 & ISO_pop_adults$sex== "male",     #test
+      ISO_pop_adults$Population*DRVs_Adults$`Energy in MJ/day`[DRVs_Adults$Age == "60–69 years PAL=1.8" & DRVs_Adults$Gender=="Male"], #yes
+      NA))  #no
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Energy_MJ_70_79_male=ifelse(
+      ISO_pop_adults$age%in%70:79 & ISO_pop_adults$sex== "male",     #test
+      ISO_pop_adults$Population*DRVs_Adults$`Energy in MJ/day`[DRVs_Adults$Age == "70–79 years PAL=1.8" & DRVs_Adults$Gender=="Male"], #yes
+      NA))  #no
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Energy_MJ_80_male=ifelse(
+      ISO_pop_adults$age%in%80 & ISO_pop_adults$sex== "male",     #test
+      ISO_pop_adults$Population*DRVs_Adults$`Energy in MJ/day`[DRVs_Adults$Age == "70–79 years PAL=1.6" & DRVs_Adults$Gender=="Male"], #yes
+      NA))  #no
+  
+  ISO_pop_adults$Energy_MJ<-rowSums(ISO_pop_adults[,c("Energy_MJ_70_79_male","Energy_MJ_60_69_male","Energy_MJ_50_59_male","Energy_MJ_40_49_male","Energy_MJ_30_39_male","Energy_MJ_18_29_male","Energy_MJ_70_79_female","Energy_MJ_60_69_female","Energy_MJ_50_59_female","Energy_MJ_40_49_female","Energy_MJ_30_39_female","Energy_MJ_18_29_female","Energy_MJ_80_male","Energy_MJ_80_female")], na.rm = T)    #to one column
+  ISO_pop_adults$Energy_MJ<-ISO_pop_adults$Energy_MJ*365
+  sum(ISO_pop_adults$Energy_MJ== 0) #check if each year is calculated
+  
+  
+  #PROTEIN 
+  #Calculating weight of all Adults
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Pop_Weight_kg_female_18_29 = ifelse(     
+      ISO_pop_adults$sex == "female" & ISO_pop_adults$age%in% 18:29,      #test
+      ISO_pop_adults$Population*ref_weight$Reference.weight..kg..Female[ref_weight$Age..yr.== "18-29"],    #yes
+      NA))
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Pop_Weight_kg_female_30_59 = ifelse(     
+      ISO_pop_adults$sex == "female" & ISO_pop_adults$age%in% 30:59,      #test
+      ISO_pop_adults$Population*ref_weight$Reference.weight..kg..Female[ref_weight$Age..yr.== "30-59"],    #yes
+      NA))
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Pop_Weight_kg_female_60_74 = ifelse(     
+      ISO_pop_adults$sex == "female" & ISO_pop_adults$age%in% 60:74,      #test
+      ISO_pop_adults$Population*ref_weight$Reference.weight..kg..Female[ref_weight$Age..yr.== "60-74"],    #yes
+      NA))
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Pop_Weight_kg_female_75_older = ifelse(     
+      ISO_pop_adults$sex == "female" & ISO_pop_adults$age>=75,      #test
+      ISO_pop_adults$Population*ref_weight$Reference.weight..kg..Female[ref_weight$Age..yr.== "≥75"],    #yes
+      NA))
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Pop_Weight_kg_male_18_29 = ifelse(     
+      ISO_pop_adults$sex == "male" & ISO_pop_adults$age%in% 18:29,      #test
+      ISO_pop_adults$Population*ref_weight$Reference.weight..kg..Male[ref_weight$Age..yr.== "18-29"],    #yes
+      NA))
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Pop_Weight_kg_male_30_59 = ifelse(     
+      ISO_pop_adults$sex == "male" & ISO_pop_adults$age%in% 30:59,      #test
+      ISO_pop_adults$Population*ref_weight$Reference.weight..kg..Male[ref_weight$Age..yr.== "30-59"],    #yes
+      NA))
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Pop_Weight_kg_male_60_74 = ifelse(     
+      ISO_pop_adults$sex == "male" & ISO_pop_adults$age%in% 60:74,      #test
+      ISO_pop_adults$Population*ref_weight$Reference.weight..kg..Male[ref_weight$Age..yr.== "60-74"],    #yes
+      NA))
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Pop_Weight_kg_male_75_older = ifelse(     
+      ISO_pop_adults$sex == "male" & ISO_pop_adults$age>=75,      #test
+      ISO_pop_adults$Population*ref_weight$Reference.weight..kg..Male[ref_weight$Age..yr.== "≥75"],    #yes
+      NA))
+  
+  #Calculating Protein
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Protein_g_female_18_29 = ifelse(          
+      ISO_pop_adults$sex == "female"& ISO_pop_adults$age%in%18:29,      #test
+      ISO_pop_adults$Pop_Weight_kg_female_18_29*DRVs_Adults$`Protein in g/kg bw per day`[DRVs_Adults$Gender== "Female" & DRVs_Adults$Age=="≥ 18 years"& DRVs_Adults$`Target population`== "Adults"],    #yes
+      NA))        #No
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Protein_g_female_30_59 = ifelse(          
+      ISO_pop_adults$sex == "female"& ISO_pop_adults$age%in%30:59,      #test
+      ISO_pop_adults$Pop_Weight_kg_female_30_59*DRVs_Adults$`Protein in g/kg bw per day`[DRVs_Adults$Gender== "Female" & DRVs_Adults$Age=="≥ 18 years"& DRVs_Adults$`Target population`== "Adults"],    #yes
+      NA))        #No
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Protein_g_female_60_74 = ifelse(          
+      ISO_pop_adults$sex == "female"& ISO_pop_adults$age%in%60:74,      #test
+      ISO_pop_adults$Pop_Weight_kg_female_60_74*DRVs_Adults$`Protein in g/kg bw per day`[DRVs_Adults$Gender== "Female" & DRVs_Adults$Age=="≥ 18 years"& DRVs_Adults$`Target population`== "Adults"],    #yes
+      NA))        #No
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Protein_g_female_75_older = ifelse(          
+      ISO_pop_adults$sex == "female"& ISO_pop_adults$age>=75,      #test
+      ISO_pop_adults$Pop_Weight_kg_female_75_older*DRVs_Adults$`Protein in g/kg bw per day`[DRVs_Adults$Gender== "Female" & DRVs_Adults$Age=="≥ 18 years"& DRVs_Adults$`Target population`== "Adults"],    #yes
+      NA))        #No
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Protein_g_male_18_29 = ifelse(          
+      ISO_pop_adults$sex == "male"& ISO_pop_adults$age%in%18:29,      #test
+      ISO_pop_adults$Pop_Weight_kg_male_18_29*DRVs_Adults$`Protein in g/kg bw per day`[DRVs_Adults$Gender== "Male" & DRVs_Adults$Age=="≥ 18 years"& DRVs_Adults$`Target population`== "Adults"],    #yes
+      NA))        #No
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Protein_g_male_30_59 = ifelse(          
+      ISO_pop_adults$sex == "male"& ISO_pop_adults$age%in%30:59,      #test
+      ISO_pop_adults$Pop_Weight_kg_male_30_59*DRVs_Adults$`Protein in g/kg bw per day`[DRVs_Adults$Gender== "Male" & DRVs_Adults$Age=="≥ 18 years"& DRVs_Adults$`Target population`== "Adults"],    #yes
+      NA))        #No
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Protein_g_male_60_74 = ifelse(          
+      ISO_pop_adults$sex == "male"& ISO_pop_adults$age%in%60:74,      #test
+      ISO_pop_adults$Pop_Weight_kg_male_60_74*DRVs_Adults$`Protein in g/kg bw per day`[DRVs_Adults$Gender== "Male" & DRVs_Adults$Age=="≥ 18 years"& DRVs_Adults$`Target population`== "Adults"],    #yes
+      NA))        #No
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Protein_g_male_75_older = ifelse(          
+      ISO_pop_adults$sex == "male"& ISO_pop_adults$age>=75,      #test
+      ISO_pop_adults$Pop_Weight_kg_male_75_older*DRVs_Adults$`Protein in g/kg bw per day`[DRVs_Adults$Gender== "Male" & DRVs_Adults$Age=="≥ 18 years"& DRVs_Adults$`Target population`== "Adults"],    #yes
+      NA))        #No
+  
+  ISO_pop_adults$Protein_g<-rowSums(ISO_pop_adults[,c("Protein_g_male_75_older","Protein_g_male_60_74","Protein_g_male_30_59","Protein_g_male_18_29","Protein_g_female_75_older","Protein_g_female_60_74","Protein_g_female_30_59","Protein_g_female_18_29")], na.rm = T)    #to one column
+  ISO_pop_adults$Protein_g<-ISO_pop_adults$Protein_g*365
+  sum(ISO_pop_adults$Protein_g== 0) #check if each year is calculated
+  
+  
+  #CALCIUM
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Ca_mg_18_24=ifelse(
+      ISO_pop_adults$age%in% 18:24,     #test
+      ISO_pop_adults$Population*DRVs_Adults$`Ca in mg/day`[DRVs_Adults$Age == "18-24 years"], #yes
+      NA))  #no
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Ca_mg_25_plus=ifelse(
+      ISO_pop_adults$age>=25,     #test
+      ISO_pop_adults$Population*DRVs_Adults$`Ca in mg/day`[DRVs_Adults$Age == "≥ 25 years"], #yes
+      NA))  #no
+  
+  ISO_pop_adults$Ca_mg<-rowSums(ISO_pop_adults[,c("Ca_mg_25_plus","Ca_mg_18_24")], na.rm = T)    #to one column
+  ISO_pop_adults$Ca_mg<-ISO_pop_adults$Ca_mg*365
+  sum(ISO_pop_adults$Ca_mg== 0) #check if each year is calculated
+  
+  #IRON
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Fe_mg_18_plus_male=ifelse(
+      ISO_pop_adults$age>=18 & ISO_pop_adults$sex =="male" ,     #test
+      ISO_pop_adults$Population*DRVs_Adults$`Fe in mg/day`[DRVs_Adults$Age =="≥ 18 years" & DRVs_Adults$Gender == "Male" & DRVs_Adults$`Target population`=="Adults"], #yes
+      NA))  #no
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Fe_mg_18_49_female=ifelse(
+      ISO_pop_adults$age%in% 18:49 & ISO_pop_adults$sex =="female" ,     #test
+      ISO_pop_adults$Population*DRVs_Adults$`Fe in mg/day`[DRVs_Adults$Age =="≥ 18 years" & DRVs_Adults$Gender == "Female" & DRVs_Adults$`Target population`=="Premenopausal women"], #yes
+      NA))  #no
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Fe_mg_50_plus_female=ifelse(
+      ISO_pop_adults$age>=50 & ISO_pop_adults$sex =="female" ,     #test
+      ISO_pop_adults$Population*DRVs_Adults$`Fe in mg/day`[DRVs_Adults$Age =="≥ 40 years" & DRVs_Adults$Gender == "Female" & DRVs_Adults$`Target population`=="Postmenopausal women"], #yes
+      NA))  #no
+  
+  ISO_pop_adults$Fe_mg<-rowSums(ISO_pop_adults[,c("Fe_mg_50_plus_female","Fe_mg_18_49_female", "Fe_mg_18_plus_male")], na.rm = T)    #to one column
+  ISO_pop_adults$Fe_mg<-ISO_pop_adults$Fe_mg*365
+  sum(ISO_pop_adults$Fe_mg== 0) #check if each year is calculated
+  
+  #MAGNESIUM
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Mg_mg_18_plus_male=ifelse(
+      ISO_pop_adults$age>=18 & ISO_pop_adults$sex =="male" ,     #test
+      ISO_pop_adults$Population*DRVs_Adults$`Mg in mg/day`[DRVs_Adults$Age =="≥ 18 years" & DRVs_Adults$Gender == "Male" & DRVs_Adults$`Target population`=="Adults"], #yes
+      NA))  #no
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Mg_mg_18_plus_female=ifelse(
+      ISO_pop_adults$age>=18 & ISO_pop_adults$sex =="female" ,     #test
+      ISO_pop_adults$Population*DRVs_Adults$`Mg in mg/day`[DRVs_Adults$Age =="≥ 18 years" & DRVs_Adults$Gender == "Female" & DRVs_Adults$`Target population`=="Adults"], #yes
+      NA))  #no
+  
+  ISO_pop_adults$Mg_mg<-rowSums(ISO_pop_adults[,c("Mg_mg_18_plus_female", "Mg_mg_18_plus_male")], na.rm = T)    #to one column
+  ISO_pop_adults$Mg_mg<-ISO_pop_adults$Mg_mg*365
+  sum(ISO_pop_adults$Fe_mg== 0) #check if each year is calculated
+  
+  
+  #ZINC
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Zn_mg_18_older_female =ifelse(
+      ISO_pop_adults$age>= 18 & ISO_pop_adults$sex == "female",     #test
+      ISO_pop_adults$Population*DRVs_Adults$`Zn in mg/day`[DRVs_Adults$`Target population`== "Adults (LPI 900 mg/day)" & DRVs_Adults$Gender == "Female"], #yes
+      NA))  #no
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Zn_mg_18_older_male =ifelse(
+      ISO_pop_adults$age>= 18 & ISO_pop_adults$sex == "male",     #test
+      ISO_pop_adults$Population*DRVs_Adults$`Zn in mg/day`[DRVs_Adults$`Target population`== "Adults (LPI 900 mg/day)" & DRVs_Adults$Gender == "Male"], #yes
+      NA))  #no
+  
+  ISO_pop_adults$Zn_mg<-rowSums(ISO_pop_adults[,c("Zn_mg_18_older_male","Zn_mg_18_older_female")], na.rm = T)    #to one column
+  ISO_pop_adults$Zn_mg<-ISO_pop_adults$Zn_mg*365
+  sum(ISO_pop_children$Zn_mg== 0)
+  
+  
+  #VITAMIN B12
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Vit_B12_μg=ifelse(
+      ISO_pop_adults$age>=18,     #test
+      ISO_pop_adults$Population*DRVs_Adults$`Vit B12 in μg/day`[DRVs_Adults$Age =="≥ 18 years" & DRVs_Adults$Gender == "Both genders" & DRVs_Adults$`Target population`=="Adults"], #yes
+      NA))  #no
+  # already for complete dataframe-> no rowSums
+  ISO_pop_adults$Vit_B12_μg<-ISO_pop_adults$Vit_B12_μg*365
+  
+  #FOLATE
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Folate_μg_DFE=ifelse(
+      ISO_pop_adults$age>=18,     #test
+      ISO_pop_adults$Population*DRVs_Adults$`Folate in μg DFE/day`[DRVs_Adults$Age =="≥ 18 years" & DRVs_Adults$Gender == "Both genders" & DRVs_Adults$`Target population`=="Adults"], #yes
+      NA))  #no
+  # already for complete dataframe-> no rowSums
+  ISO_pop_adults$Folate_μg_DFE<-ISO_pop_adults$Folate_μg_DFE*365
+  
+  #VITAMIN A
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Vit_A_μg_RE_18_plus_male=ifelse(
+      ISO_pop_adults$age>=18 & ISO_pop_adults$sex== "male",     #test
+      ISO_pop_adults$Population*DRVs_Adults$`Vit A in μg RE/day`[DRVs_Adults$Age =="≥ 18 years" & DRVs_Adults$Gender == "Male" & DRVs_Adults$`Target population`=="Adults"], #yes
+      NA))  #no
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Vit_A_μg_RE_18_49_female=ifelse(
+      ISO_pop_adults$age%in%18:49 & ISO_pop_adults$sex== "female",     #test
+      ISO_pop_adults$Population*DRVs_Adults$`Vit A in μg RE/day`[DRVs_Adults$Age =="18-59 years" & DRVs_Adults$Gender == "Female" & DRVs_Adults$`Target population`=="Premenopausal women"], #yes
+      NA))  #no
+  ISO_pop_adults<-ISO_pop_adults%>%
+    mutate(Vit_A_μg_RE_50_plus_female=ifelse(
+      ISO_pop_adults$age>=50 & ISO_pop_adults$sex== "female",     #test
+      ISO_pop_adults$Population*DRVs_Adults$`Vit A in μg RE/day`[DRVs_Adults$Age =="≥ 40 years" & DRVs_Adults$Gender == "Female" & DRVs_Adults$`Target population`=="Postmenopausal women"], #yes
+      NA))  #no
+  
+  ISO_pop_adults$Vit_A_μg_RE<-rowSums(ISO_pop_adults[,c("Vit_A_μg_RE_50_plus_female", "Vit_A_μg_RE_18_49_female", "Vit_A_μg_RE_18_plus_male")], na.rm = T)    #to one column
+  sum(ISO_pop_adults$Vit_A_μg_RE== 0) #check if each year is calculated
+  ISO_pop_adults$Vit_A_μg_RE<-ISO_pop_adults$Vit_A_μg_RE*365
+  
+  #remove all columns with digits and _ as they are just intermediate results
+  ISO_pop_adults<-ISO_pop_adults%>% select(-matches("_\\d+_")) 
+
+  
+####LACTATING WOMEN####
+  # Since Energy, Zinc and Protein requirements are differently depending on Physical Activity Level (PAL) resp. bodyweight (bw), resp. phytate intake (LPI)- extra requirements for lactating women should be added to non-lactating requirements. Mind that for Protein the added portion is in absolut values and not per kg body weight.  
+  # The efsa provides values for the needs of lactating women over the age of 18. I took the childbearing age of 15-49 years to calculate the number of lactating women and therefore I assign the needs of the 15-18 year old pregnant women to those of the youngest (18-24 year olds) group. 
+  # As every Pregnancy is assumed to be followed by (exactly) 6 months of lactating, there are no requirements used such as for Protein: "Lactating women (>6 months post partum)".
+  #ENERGY 
+  ISO_pop_lactating<-ISO_pop_lactating%>%
+    mutate(Energy_MJ_15_29_lact = ifelse(
+      ISO_pop_lactating$age%in%15:29,     #test
+      ISO_pop_lactating$Population*(DRVs_Adults$`Energy in MJ/day`[DRVs_Adults$Age == "18–29 years PAL=1.8" & DRVs_Adults$Gender=="Female"]                           #Adult +lactating requirements
+                                    +DRVs_Lactating$`Energy in MJ/day (added to normal)`[DRVs_Lactating$Age=="≥ 18 years" &  DRVs_Lactating$`Target population`=="Lactating women"]), #yes
+      NA))  #no
+  ISO_pop_lactating<-ISO_pop_lactating%>%
+    mutate(Energy_MJ_30_39_lact = ifelse(
+      ISO_pop_lactating$age%in%30:39,     #test
+      ISO_pop_lactating$Population*(DRVs_Adults$`Energy in MJ/day`[DRVs_Adults$Age == "30–39 years PAL=1.8" & DRVs_Adults$Gender=="Female"]                           #Adult +lactating requirements
+                                    +DRVs_Lactating$`Energy in MJ/day (added to normal)`[DRVs_Lactating$Age=="≥ 18 years" &  DRVs_Lactating$`Target population`=="Lactating women"]), #yes
+      NA))  #no
+  ISO_pop_lactating<-ISO_pop_lactating%>%
+    mutate(Energy_MJ_40_49_lact = ifelse(
+      ISO_pop_lactating$age%in%40:49,     #test
+      ISO_pop_lactating$Population*(DRVs_Adults$`Energy in MJ/day`[DRVs_Adults$Age == "40–49 years PAL=1.8" & DRVs_Adults$Gender=="Female"]                           #Adult +lactating requirements
+                                    +DRVs_Lactating$`Energy in MJ/day (added to normal)`[DRVs_Lactating$Age=="≥ 18 years" &  DRVs_Lactating$`Target population`=="Lactating women"]), #yes
+      NA))  #no
+  
+  ISO_pop_lactating$Energy_MJ<-rowSums(ISO_pop_lactating[,c("Energy_MJ_40_49_lact", "Energy_MJ_30_39_lact","Energy_MJ_15_29_lact")], na.rm = T)    #to one column
+  ISO_pop_lactating$Energy_MJ<-ISO_pop_lactating$Energy_MJ*365
+  sum(ISO_pop_lactating$Energy_MJ== 0) #check if each year is calculated
+  
+  #PROTEIN 
+  #Calculate Weights of all Lactating women
+  ISO_pop_lactating<-ISO_pop_lactating%>%
+    mutate(Pop_Weight_kg_lact_15_17 = ifelse(     
+      ISO_pop_lactating$age%in% 15:17,      #test
+      ISO_pop_lactating$Population*ref_weight$Reference.weight..kg..Female[ref_weight$Age..yr.== "15-17"],    #yes
+      NA))
+  ISO_pop_lactating<-ISO_pop_lactating%>%
+    mutate(Pop_Weight_kg_lact_18_29 = ifelse(     
+      ISO_pop_lactating$age%in% 18:29,      #test
+      ISO_pop_lactating$Population*ref_weight$Reference.weight..kg..Female[ref_weight$Age..yr.== "18-29"],    #yes
+      NA))
+  ISO_pop_lactating<-ISO_pop_lactating%>%
+    mutate(Pop_Weight_kg_lact_30_plus = ifelse(     
+      ISO_pop_lactating$age>= 30,      #test
+      ISO_pop_lactating$Population*ref_weight$Reference.weight..kg..Female[ref_weight$Age..yr.== "30-59"],    #yes
+      NA))
+  
+  #Calculating Protein
+  ISO_pop_lactating<-ISO_pop_lactating%>%
+    mutate(Protein_g_lact_15_17 = ifelse(          
+      ISO_pop_lactating$age%in%15:17,      #test
+      ISO_pop_lactating$Pop_Weight_kg_lact_15_17*          #mean of values link via OR
+        mean(DRVs_Children$`Protein in g/kg bw per day`
+             [DRVs_Children$Gender== "Female" & DRVs_Children$Age=="15 years" 
+               |DRVs_Children$Gender== "Female" & DRVs_Children$Age=="16 years"
+               |DRVs_Children$Gender== "Female" & DRVs_Children$Age=="17 years"])
+      + DRVs_Lactating$`Protein in g per day (added to normal)`[DRVs_Lactating$`Target population`=="Lactating women (0–6 months post partum)"]*ISO_pop_lactating$Population,  # mean of DRVs Children as reference weights are not finer scaled; + extra requirements for lactating
+      NA))         #No
+  ISO_pop_lactating<-ISO_pop_lactating%>%
+    mutate(Protein_g_lact_18_29 = ifelse(          
+      ISO_pop_lactating$age%in%18:29,      #test
+      ISO_pop_lactating$Pop_Weight_kg_lact_18_29*DRVs_Adults$`Protein in g/kg bw per day`[DRVs_Adults$Gender== "Female" & DRVs_Adults$Age=="≥ 18 years"& DRVs_Adults$`Target population`== "Adults"]+DRVs_Lactating$`Protein in g per day (added to normal)`[DRVs_Lactating$`Target population`=="Lactating women (0–6 months post partum)"]*ISO_pop_lactating$Population,    #+ extra requirements for lactating
+      NA))        #No
+  ISO_pop_lactating<-ISO_pop_lactating%>%
+    mutate(Protein_g_lact_30_plus = ifelse(          
+      ISO_pop_lactating$age>= 30,      #test
+      ISO_pop_lactating$Pop_Weight_kg_lact_30_plus*DRVs_Adults$`Protein in g/kg bw per day`[DRVs_Adults$Gender== "Female" & DRVs_Adults$Age=="≥ 18 years"& DRVs_Adults$`Target population`== "Adults"]+DRVs_Lactating$`Protein in g per day (added to normal)`[DRVs_Lactating$`Target population`=="Lactating women (0–6 months post partum)"]*ISO_pop_lactating$Population,    #+ extra requirements for lactating
+      NA))        #No
+  
+  ISO_pop_lactating$Protein_g<-rowSums(ISO_pop_lactating[,c("Protein_g_lact_30_plus", "Protein_g_lact_18_29","Protein_g_lact_15_17")], na.rm = T)    #to one column
+  sum(ISO_pop_lactating$Protein_g== 0) #check if each year is calculated
+  ISO_pop_lactating$Protein_g<-ISO_pop_lactating$Protein_g*365
+  
+  
+  #CALCIUM
+  ISO_pop_lactating<-ISO_pop_lactating%>%
+    mutate(Ca_mg_15_24=ifelse(
+      ISO_pop_lactating$age%in% 15:24,     #test
+      ISO_pop_lactating$Population*DRVs_Lactating$`Ca in mg/day`[DRVs_Lactating$Age =="18-24 years"], #yes
+      NA))  #no
+  ISO_pop_lactating<-ISO_pop_lactating%>%
+    mutate(Ca_mg_25_plus=ifelse(
+      ISO_pop_lactating$age>= 25,     #test
+      ISO_pop_lactating$Population*DRVs_Lactating$`Ca in mg/day`[DRVs_Lactating$Age =="≥ 25 years"], #yes
+      NA))  #no
+  
+  ISO_pop_lactating$Ca_mg<-rowSums(ISO_pop_lactating[,c("Ca_mg_25_plus", "Ca_mg_15_24")], na.rm = T)    #to one column
+  sum(ISO_pop_lactating$Ca_mg== 0) #check if each year is calculated
+  ISO_pop_lactating$Ca_mg<-ISO_pop_lactating$Ca_mg*365
+  
+  #IRON
+  ISO_pop_lactating<-ISO_pop_lactating%>%
+    mutate(Fe_mg=ifelse(
+      ISO_pop_lactating$age>=15,     #test
+      ISO_pop_lactating$Population*DRVs_Lactating$`Fe in mg/day`[DRVs_Lactating$Age =="≥ 18 years" & DRVs_Lactating$`Target population`=="Lactating women"],
+      NA))#no
+  # already for complete dataframe-> no rowSums
+  ISO_pop_lactating$Fe_mg<-ISO_pop_lactating$Fe_mg*365
+  
+  #MAGNESIUM
+  ISO_pop_lactating<-ISO_pop_lactating%>%
+    mutate(Mg_mg=ifelse(
+      ISO_pop_lactating$age >= 15,     #test
+      ISO_pop_lactating$Population*DRVs_Lactating$`Mg in mg/day`[DRVs_Lactating$Age =="≥ 18 years"& DRVs_Lactating$`Target population`=="Lactating women"],#yes
+      NA))#No
+  # already for complete dataframe-> no rowSums
+  ISO_pop_lactating$Mg_mg<-ISO_pop_lactating$Mg_mg*365
+  
+  #ZINC
+  ISO_pop_lactating<-ISO_pop_lactating%>%
+    mutate(Zn_mg = ifelse(
+      ISO_pop_lactating$age>=15,     #test
+      ISO_pop_lactating$Population*(DRVs_Adults$`Zn in mg/day`[DRVs_Adults$`Target population` == "Adults (LPI 900 mg/day)" & DRVs_Adults$Gender=="Female"]                           #Adult +lactating requirements
+                                    +DRVs_Lactating$`Zn in mg/day (added to normal)`[DRVs_Lactating$Age=="≥ 18 years" &  DRVs_Lactating$`Target population`=="Lactating women"]), #yes
+      NA))  #no
+  # already for complete dataframe-> no rowSums
+  ISO_pop_lactating$Zn_mg<-ISO_pop_lactating$Zn_mg*365
+  
+  #VITAMIN B12
+  ISO_pop_lactating<-ISO_pop_lactating%>%
+    mutate(Vit_B12_μg=ifelse(
+      ISO_pop_lactating$age>=15,     #test
+      ISO_pop_lactating$Population*DRVs_Lactating$`Vit B12 in μg/day`[DRVs_Lactating$Age =="≥ 18 years" & DRVs_Lactating$`Target population`=="Lactating women"],# yes
+      NA))# no 
+  # already for complete dataframe-> no rowSums
+  ISO_pop_lactating$Vit_B12_μg<-ISO_pop_lactating$Vit_B12_μg*365
+  
+  #Folate
+  ISO_pop_lactating<-ISO_pop_lactating%>%
+    mutate(Folate_μg_DFE=ifelse(
+      ISO_pop_lactating$age>= 15,     #test
+      ISO_pop_lactating$Population*DRVs_Lactating$`Folate in μg DFE/day`[DRVs_Lactating$Age =="≥ 18 years" & DRVs_Lactating$`Target population`=="Lactating women"],# yes
+      NA))# no
+  # already for complete dataframe-> no rowSums
+  ISO_pop_lactating$Folate_μg_DFE<-ISO_pop_lactating$Folate_μg_DFE*365
+  
+  #Vitamin A
+  ISO_pop_lactating<-ISO_pop_lactating%>%
+    mutate(Vit_A_μg_RE=ifelse(
+      ISO_pop_lactating$age>= 15,     #test
+      ISO_pop_lactating$Population*DRVs_Lactating$`Vit A in μg RE/day`[DRVs_Lactating$Age =="≥ 18 years" & DRVs_Lactating$`Target population`=="Lactating women"],# yes
+      NA))# no 
+  # already for complete dataframe-> no rowSums
+  ISO_pop_lactating$Vit_A_μg_RE<-ISO_pop_lactating$Vit_A_μg_RE*365
+  
+  
+  
+  #remove all columns with digits and _ as they are just intermediate results
+  ISO_pop_lactating<-ISO_pop_lactating%>% select(-matches("_\\d+_")) 
+# ####PREGNANT####
+#   Since Energy, Zinc and Protein requirements are differently depending on Physical Activity Level (PAL) resp. bodyweight (bw), resp. phytate intake (LPI)- extra requirements for pregnant women should be added to non-lactating requirements. 
+#   Mind that for Protein the added portion is in absolute values and not per kg body weight.  
+#   The efsa provides values for the needs of pregnant women over the age of 18. I took the childbearing age of 15-49 years to calculate the number of lactating women and therefore I assign the needs of the 15-18 year old's to those of the youngest (18-24 year old's) group.
+#   For Energy and Protein the requirements differ depending on the trimester of pregnancy.
+#   
+  #ENERGY 
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Energy_MJ_15_29_first_trim = ifelse(
+      ISO_pop_pregnant$age%in%15:29,     #test
+      ISO_pop_pregnant$Population/3*(DRVs_Adults$`Energy in MJ/day`[DRVs_Adults$Age == "18–29 years PAL=1.8" & DRVs_Adults$Gender=="Female"]                           #Adult +lactating requirements
+                                     +DRVs_Pregnant$`Energy in MJ/day (added to normal)`[DRVs_Pregnant$Age=="≥ 18 years" &  DRVs_Pregnant$`Target population`=="Pregnant women (1st trimester)"]), #yes
+      NA))  #no
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Energy_MJ_15_29_scnd_trim = ifelse(
+      ISO_pop_pregnant$age%in%15:29,     #test
+      ISO_pop_pregnant$Population/3*(DRVs_Adults$`Energy in MJ/day`[DRVs_Adults$Age == "18–29 years PAL=1.8" & DRVs_Adults$Gender=="Female"]                           #Adult +lactating requirements
+                                     +DRVs_Pregnant$`Energy in MJ/day (added to normal)`[DRVs_Pregnant$Age=="≥ 18 years" &  DRVs_Pregnant$`Target population`=="Pregnant women (2nd trimester)"]), #yes
+      NA))  #no
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Energy_MJ_15_29_thrid_trim = ifelse(
+      ISO_pop_pregnant$age%in%15:29,     #test
+      ISO_pop_pregnant$Population/3*(DRVs_Adults$`Energy in MJ/day`[DRVs_Adults$Age == "18–29 years PAL=1.8" & DRVs_Adults$Gender=="Female"]                           #Adult +lactating requirements
+                                     +DRVs_Pregnant$`Energy in MJ/day (added to normal)`[DRVs_Pregnant$Age=="≥ 18 years" &  DRVs_Pregnant$`Target population`=="Pregnant women (3rd trimester)"]), #yes
+      NA))  #no
+  
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Energy_MJ_30_39_first_trim = ifelse(
+      ISO_pop_pregnant$age%in%30:39,     #test
+      ISO_pop_pregnant$Population/3*(DRVs_Adults$`Energy in MJ/day`[DRVs_Adults$Age == "30–39 years PAL=1.8" & DRVs_Adults$Gender=="Female"]                           #Adult +lactating requirements
+                                     +DRVs_Pregnant$`Energy in MJ/day (added to normal)`[DRVs_Pregnant$Age=="≥ 18 years" &  DRVs_Pregnant$`Target population`=="Pregnant women (1st trimester)"]), #yes
+      NA))  #no
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Energy_MJ_30_39_scnd_trim = ifelse(
+      ISO_pop_pregnant$age%in%30:39,     #test
+      ISO_pop_pregnant$Population/3*(DRVs_Adults$`Energy in MJ/day`[DRVs_Adults$Age == "30–39 years PAL=1.8" & DRVs_Adults$Gender=="Female"]                           #Adult +lactating requirements
+                                     +DRVs_Pregnant$`Energy in MJ/day (added to normal)`[DRVs_Pregnant$Age=="≥ 18 years" &  DRVs_Pregnant$`Target population`=="Pregnant women (2nd trimester)"]), #yes
+      NA))  #no
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Energy_MJ_30_39_thrid_trim = ifelse(
+      ISO_pop_pregnant$age%in%30:39,     #test
+      ISO_pop_pregnant$Population/3*(DRVs_Adults$`Energy in MJ/day`[DRVs_Adults$Age == "30–39 years PAL=1.8" & DRVs_Adults$Gender=="Female"]                           #Adult +lactating requirements
+                                     +DRVs_Pregnant$`Energy in MJ/day (added to normal)`[DRVs_Pregnant$Age=="≥ 18 years" &  DRVs_Pregnant$`Target population`=="Pregnant women (3rd trimester)"]), #yes
+      NA))  #no
+  
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Energy_MJ_40_49_first_trim = ifelse(
+      ISO_pop_pregnant$age%in%40:49,     #test
+      ISO_pop_pregnant$Population/3*(DRVs_Adults$`Energy in MJ/day`[DRVs_Adults$Age == "40–49 year PAL=1.8" & DRVs_Adults$Gender=="Female"]                           #Adult +lactating requirements
+                                     +DRVs_Pregnant$`Energy in MJ/day (added to normal)`[DRVs_Pregnant$Age=="≥ 18 years" &  DRVs_Pregnant$`Target population`=="Pregnant women (1st trimester)"]), #yes
+      NA))  #no
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Energy_MJ_40_49_scnd_trim = ifelse(
+      ISO_pop_pregnant$age%in%40:49,     #test
+      ISO_pop_pregnant$Population/3*(DRVs_Adults$`Energy in MJ/day`[DRVs_Adults$Age == "40–49 years PAL=1.8" & DRVs_Adults$Gender=="Female"]                           #Adult +lactating requirements
+                                     +DRVs_Pregnant$`Energy in MJ/day (added to normal)`[DRVs_Pregnant$Age=="≥ 18 years" &  DRVs_Pregnant$`Target population`=="Pregnant women (2nd trimester)"]), #yes
+      NA))  #no
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Energy_MJ_40_49_thrid_trim = ifelse(
+      ISO_pop_pregnant$age%in%40:49,     #test
+      ISO_pop_pregnant$Population/3*(DRVs_Adults$`Energy in MJ/day`[DRVs_Adults$Age == "40–49 years PAL=1.8" & DRVs_Adults$Gender=="Female"]                           #Adult +lactating requirements
+                                     +DRVs_Pregnant$`Energy in MJ/day (added to normal)`[DRVs_Pregnant$Age=="≥ 18 years" &  DRVs_Pregnant$`Target population`=="Pregnant women (3rd trimester)"]), #yes
+      NA))  #no
+  
+  ISO_pop_pregnant$Energy_MJ<-rowSums(ISO_pop_pregnant[,c("Energy_MJ_40_49_thrid_trim", "Energy_MJ_40_49_scnd_trim","Energy_MJ_40_49_first_trim", "Energy_MJ_30_39_thrid_trim", "Energy_MJ_30_39_scnd_trim", "Energy_MJ_30_39_first_trim", "Energy_MJ_15_29_thrid_trim", "Energy_MJ_15_29_scnd_trim", "Energy_MJ_15_29_first_trim")], na.rm = T)    #to one column
+  ISO_pop_pregnant$Energy_MJ<-ISO_pop_pregnant$Energy_MJ*365
+  sum(ISO_pop_pregnant$Energy_MJ== 0) #check if each year is calculated
+  
+  
+  #PROTEIN 
+  #Calculate Weights of all Lactating women
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Pop_Weight_kg_preg_15_17 = ifelse(     
+      ISO_pop_pregnant$age%in% 15:17,      #test
+      ISO_pop_pregnant$Population*ref_weight$Reference.weight..kg..Female[ref_weight$Age..yr.== "15-17"],    #yes
+      NA))
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Pop_Weight_kg_preg_18_29 = ifelse(     
+      ISO_pop_pregnant$age%in% 18:29,      #test
+      ISO_pop_pregnant$Population*ref_weight$Reference.weight..kg..Female[ref_weight$Age..yr.== "18-29"],    #yes
+      NA))
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Pop_Weight_kg_preg_30_plus = ifelse(     
+      ISO_pop_pregnant$age>= 30,      #test
+      ISO_pop_pregnant$Population*ref_weight$Reference.weight..kg..Female[ref_weight$Age..yr.== "30-59"],    #yes
+      NA))
+  
+  #Calculate Protein
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Protein_g_preg_15_17_first_tri = ifelse(          
+      ISO_pop_pregnant$age%in%15:17,      #test
+      (ISO_pop_pregnant$Pop_Weight_kg_preg_15_17/3)*          #mean of values link via OR
+        mean(DRVs_Children$`Protein in g/kg bw per day`
+             [DRVs_Children$Gender== "Female" & DRVs_Children$Age=="15 years" 
+               |DRVs_Children$Gender== "Female" & DRVs_Children$Age=="16 years"
+               |DRVs_Children$Gender== "Female" & DRVs_Children$Age=="17 years"])
+      + DRVs_Pregnant$`Protein in g per day (added to normal)`[DRVs_Pregnant$`Target population`=="Pregnant women (1st trimester)"]*ISO_pop_pregnant$Population,  # mean of DRVs Children as reference weights are not finer scaled; + extra requirements for lactating
+      NA))         #No
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Protein_g_preg_15_17_scnd_tri = ifelse(          
+      ISO_pop_pregnant$age%in%15:17,      #test
+      (ISO_pop_pregnant$Pop_Weight_kg_preg_15_17/3)*          #mean of values link via OR
+        mean(DRVs_Children$`Protein in g/kg bw per day`
+             [DRVs_Children$Gender== "Female" & DRVs_Children$Age=="15 years" 
+               |DRVs_Children$Gender== "Female" & DRVs_Children$Age=="16 years"
+               |DRVs_Children$Gender== "Female" & DRVs_Children$Age=="17 years"])
+      + DRVs_Pregnant$`Protein in g per day (added to normal)`[DRVs_Pregnant$`Target population`=="Pregnant women (2nd trimester)"]*ISO_pop_pregnant$Population,  # mean of DRVs Children as reference weights are not finer scaled; + extra requirements for lactating
+      NA))         #No
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Protein_g_preg_15_17_third_tri = ifelse(          
+      ISO_pop_pregnant$age%in%15:17,      #test
+      (ISO_pop_pregnant$Pop_Weight_kg_preg_15_17/3)*          #mean of values link via OR
+        mean(DRVs_Children$`Protein in g/kg bw per day`
+             [DRVs_Children$Gender== "Female" & DRVs_Children$Age=="15 years" 
+               |DRVs_Children$Gender== "Female" & DRVs_Children$Age=="16 years"
+               |DRVs_Children$Gender== "Female" & DRVs_Children$Age=="17 years"])
+      + DRVs_Pregnant$`Protein in g per day (added to normal)`[DRVs_Pregnant$`Target population`=="Pregnant women (thrid trimester)"]*ISO_pop_pregnant$Population,  # mean of DRVs Children as reference weights are not finer scaled; + extra requirements for lactating
+      NA))         #No
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Protein_g_preg_18_29_first_tri = ifelse(          
+      ISO_pop_pregnant$age%in%18:29,      #test
+      (ISO_pop_pregnant$Pop_Weight_kg_preg_18_29/3)*DRVs_Adults$`Protein in g/kg bw per day`[DRVs_Adults$Gender== "Female" & DRVs_Adults$Age=="≥ 18 years"& DRVs_Adults$`Target population`== "Adults"]+DRVs_Pregnant$`Protein in g per day (added to normal)`[DRVs_Pregnant$`Target population`=="Pregnant women (1st trimester)"]*ISO_pop_pregnant$Population,    #+ extra requirements for lactating
+      NA))        #No
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Protein_g_preg_18_29_scnd_tri = ifelse(          
+      ISO_pop_pregnant$age%in%18:29,      #test
+      (ISO_pop_pregnant$Pop_Weight_kg_preg_18_29/3)*DRVs_Adults$`Protein in g/kg bw per day`[DRVs_Adults$Gender== "Female" & DRVs_Adults$Age=="≥ 18 years"& DRVs_Adults$`Target population`== "Adults"]+DRVs_Pregnant$`Protein in g per day (added to normal)`[DRVs_Pregnant$`Target population`=="Pregnant women (2nd trimester)"]*ISO_pop_pregnant$Population,    #+ extra requirements for lactating
+      NA))        #No
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Protein_g_preg_18_29_third_tri = ifelse(          
+      ISO_pop_pregnant$age%in%18:29,      #test
+      (ISO_pop_pregnant$Pop_Weight_kg_preg_18_29/3)*DRVs_Adults$`Protein in g/kg bw per day`[DRVs_Adults$Gender== "Female" & DRVs_Adults$Age=="≥ 18 years"& DRVs_Adults$`Target population`== "Adults"]+DRVs_Pregnant$`Protein in g per day (added to normal)`[DRVs_Pregnant$`Target population`=="Pregnant women (3rd trimester)"]*ISO_pop_pregnant$Population,    #+ extra requirements for lactating
+      NA))        #No
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Protein_g_preg_30_plus_first_tri = ifelse(          
+      ISO_pop_pregnant$age>=30,      #test
+      (ISO_pop_pregnant$Pop_Weight_kg_preg_30_plus/3)*DRVs_Adults$`Protein in g/kg bw per day`[DRVs_Adults$Gender== "Female" & DRVs_Adults$Age=="≥ 18 years"& DRVs_Adults$`Target population`== "Adults"]+DRVs_Pregnant$`Protein in g per day (added to normal)`[DRVs_Pregnant$`Target population`=="Pregnant women (1st trimester)"]*ISO_pop_pregnant$Population,    #+ extra requirements for lactating
+      NA))        #No
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Protein_g_preg_30_plus_scnd_tri = ifelse(          
+      ISO_pop_pregnant$age>=30,      #test
+      (ISO_pop_pregnant$Pop_Weight_kg_preg_30_plus/3)*DRVs_Adults$`Protein in g/kg bw per day`[DRVs_Adults$Gender== "Female" & DRVs_Adults$Age=="≥ 18 years"& DRVs_Adults$`Target population`== "Adults"]+DRVs_Pregnant$`Protein in g per day (added to normal)`[DRVs_Pregnant$`Target population`=="Pregnant women (2nd trimester)"]*ISO_pop_pregnant$Population,    #+ extra requirements for lactating
+      NA))        #No
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Protein_g_preg_30_plus_third_tri = ifelse(          
+      ISO_pop_pregnant$age>=30,      #test
+      (ISO_pop_pregnant$Pop_Weight_kg_preg_30_plus/3)*DRVs_Adults$`Protein in g/kg bw per day`[DRVs_Adults$Gender== "Female" & DRVs_Adults$Age=="≥ 18 years"& DRVs_Adults$`Target population`== "Adults"]+DRVs_Pregnant$`Protein in g per day (added to normal)`[DRVs_Pregnant$`Target population`=="Pregnant women (3rd trimester)"]*ISO_pop_pregnant$Population,    #+ extra requirements for lactating
+      NA))        #No
+  
+  ISO_pop_pregnant$Protein_g<-rowSums(ISO_pop_pregnant[,c("Protein_g_preg_30_plus_third_tri", "Protein_g_preg_30_plus_scnd_tri","Protein_g_preg_30_plus_first_tri","Protein_g_preg_18_29_third_tri", "Protein_g_preg_18_29_scnd_tri","Protein_g_preg_18_29_first_tri","Protein_g_preg_15_17_third_tri", "Protein_g_preg_15_17_scnd_tri","Protein_g_preg_15_17_first_tri")], na.rm = T)    #to one column
+  sum(ISO_pop_pregnant$Protein_g== 0) #check if each year is calculated
+  ISO_pop_pregnant$Protein_g<-ISO_pop_pregnant$Protein_g*365
+  
+  #CALCIUM
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Ca_mg_15_24=ifelse(
+      ISO_pop_pregnant$age%in% 15:24,     #test
+      ISO_pop_pregnant$Population*DRVs_Pregnant$`Ca in mg/day`[DRVs_Pregnant$Age =="18-24 years"], #yes
+      NA))  #no
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Ca_mg_25_plus=ifelse(
+      ISO_pop_pregnant$age>= 25,     #test
+      ISO_pop_pregnant$Population*DRVs_Pregnant$`Ca in mg/day`[DRVs_Pregnant$Age =="≥ 25 years"], #yes
+      NA))  #no
+  
+  ISO_pop_pregnant$Ca_mg<-rowSums(ISO_pop_pregnant[,c("Ca_mg_25_plus", "Ca_mg_15_24")], na.rm = T)    #to one column
+  ISO_pop_pregnant$Ca_mg<-ISO_pop_pregnant$Ca_mg*365
+  sum(ISO_pop_pregnant$Ca_mg== 0) #check if each year is calculated
+  
+  #IRON
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Fe_mg=ifelse(
+      ISO_pop_pregnant$age>=15,     #test
+      ISO_pop_pregnant$Population*DRVs_Pregnant$`Fe in mg/day`[DRVs_Pregnant$Age =="≥ 18 years" & DRVs_Pregnant$`Target population`=="Pregnant women"],
+      NA))#no
+  # already for complete dataframe-> no rowSums
+  ISO_pop_pregnant$Fe_mg<-ISO_pop_pregnant$Fe_mg*365
+  
+  #MAGNESIUM
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Mg_mg=ifelse(
+      ISO_pop_pregnant$age >= 15,     #test
+      ISO_pop_pregnant$Population*DRVs_Pregnant$`Mg in mg/day`[DRVs_Pregnant$Age =="≥ 18 years"& DRVs_Pregnant$`Target population`=="Pregnant women"],#yes
+      NA))#No
+  # already for complete dataframe-> no rowSums
+  ISO_pop_pregnant$Mg_mg<-ISO_pop_pregnant$Mg_mg*365
+  
+  #ZINC
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Zn_mg = ifelse(
+      ISO_pop_pregnant$age>=15,     #test
+      ISO_pop_pregnant$Population*(DRVs_Adults$`Zn in mg/day`[DRVs_Adults$`Target population` == "Adults (LPI 900 mg/day)" & DRVs_Adults$Gender=="Female"]                           #Adult +lactating requirements
+                                   +DRVs_Pregnant$`Zn in mg/day (added to normal)`[DRVs_Pregnant$Age=="≥ 18 years" &  DRVs_Pregnant$`Target population`=="Pregnant women"]), #yes
+      NA))  #no
+  # already for complete dataframe-> no rowSums
+  ISO_pop_pregnant$Zn_mg<-ISO_pop_pregnant$Zn_mg*365
+  
+  #VITAMIN B12
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Vit_B12_μg=ifelse(
+      ISO_pop_pregnant$age>=15,     #test
+      ISO_pop_pregnant$Population*DRVs_Pregnant$`Vit B12 in μg/day`[DRVs_Pregnant$Age =="≥ 18 years" & DRVs_Pregnant$`Target population`=="Pregnant women"],# yes
+      NA))# no 
+  # already for complete dataframe-> no rowSums
+  ISO_pop_pregnant$Vit_B12_μg<-ISO_pop_pregnant$Vit_B12_μg*365
+  
+  #Folate
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Folate_μg_DFE=ifelse(
+      ISO_pop_pregnant$age>= 15,     #test
+      ISO_pop_pregnant$Population*DRVs_Pregnant$`Folate in μg DFE/day`[DRVs_Pregnant$Age =="≥ 18 years" & DRVs_Pregnant$`Target population`=="Pregnant women"],# yes
+      NA))# no
+  # already for complete dataframe-> no rowSums
+  ISO_pop_pregnant$Folate_μg_DFE<-ISO_pop_pregnant$Folate_μg_DFE*365
+  
+  #Vitamin A
+  ISO_pop_pregnant<-ISO_pop_pregnant%>%
+    mutate(Vit_A_μg_RE=ifelse(
+      ISO_pop_pregnant$age>= 15,     #test
+      ISO_pop_pregnant$Population*DRVs_Pregnant$`Vit A in μg RE/day`[DRVs_Pregnant$Age =="≥ 18 years" & DRVs_Pregnant$`Target population`=="Pregnant women"],# yes
+      NA))# no 
+  # already for complete dataframe-> no rowSums
+  ISO_pop_pregnant$Vit_A_μg_RE<-ISO_pop_pregnant$Vit_A_μg_RE*365
+  
+  #remove all columns with digits and _ as they are just intermediate results
+  ISO_pop_pregnant<-ISO_pop_pregnant%>% select(-matches("_\\d+_")) 
+  
+
+####ALL REQUIREMENTS TOGETHER####
+  #All requirements in one table
+  ISO_nutr<-ISO_pop_pregnant%>%
+    full_join(ISO_pop_lactating)%>%
+    full_join(ISO_pop_infants)%>%
+    full_join(ISO_pop_children)%>%
+    full_join(ISO_pop_adults)
+  
+  ######tests if all things joined correctly
+  #time span 1960-2018
+  unique(ISO_nutr$Year)
+  
+  #for each year ages 0-14 & 50-80 expected 2 rows (male, female)
+  test1<-ISO_nutr%>%
+    filter(age %in% 0:14)%>%
+    count(Year)/15
+  test2<-ISO_nutr%>%
+    filter(age %in% 50:80)%>%
+    count(Year)/31
+  
+  #for each year ages 15-49 expected 4 rows (male, female, pregnant, lactating)
+  test3<-ISO_nutr%>%
+    filter(age %in% 15:49)%>%
+    group_by(Year)%>%
+    count()/35
+  
+  ######One value per year
+  #store ISO_name for later 
+  ISO<-unique(ISO_nutr$ISO)
+  
+  #For each year one value per nutrient
+  ISO_nutr<-ISO_nutr%>%
+    group_by(Year)%>%
+    bind_rows(summarise(., across(Energy_MJ:Vit_A_μg_RE, sum)))%>%
+    filter(is.numeric(Year) & is.na(ISO))         #just keep summed rows
+  
+  ISO_nutr<-ISO_nutr%>%select(!c(Population, sex, age))  #keep valid columns
+  
+  ISO_nutr$ISO<-ISO    #fill with ISO name
+  
+####save as .csv####
+  nutr_needs_ISO<-ISO_nutr
+  
+  write.csv(nutr_needs_ISO, paste0("data/nutrients/nutr_demand_ISO/nutr_needs_", pop[i]))
+  
+}
+
+#### Session Info####
+#Provides the versions of R and all used packages. 
+sessionInfo()
+
+
