@@ -1,0 +1,31 @@
+Keep the right order for running the code!
+
+01_country_selection_&_split.R
+    -> country selection from global data
+    -> due to a lack of computing capacity, most data were calculated country by country and thus split from the global dataset
+    
+02_nutritional_supply.R
+    -> calculation of the nutritional supply per country 
+    -> calculation of the share in nutritional supply, which is produced domestically (to depict trade patterns) per country
+
+03_nutritional_demand.R 
+    -> calculation of the nutritional requirements per country 
+    -> contains basic assumptions, links, advice for adjusting in regional differences
+    -> better readable (but not runable) version: nutritional_demand.Rmd
+  
+04_fulfilled_nutritional_demand.R
+     -> calculation of the fulfilled nutritional requirements per country &
+     -> calculatiion of the share in fulfilled nutritional supply, which is produced domestically per country
+     -> Then: each to one global dataframe
+ 
+ 05_diversity.R
+      -> calculation of each crop diversity metric (Richness, inverse Simpson diversity, Asynchrony) per country
+      -> Then to one global dataframe
+      
+ 06_variables.R
+       -> Adding and preparing temperature and precepitation var, derived bei egli (2020)
+       -> Adding warefare, livestock, fertilizer, irrigation, gdp_per_capita data
+       -> Adding Region information using regions from SDGs classification
+       -> Make one global table containing all variables for analysis
+       
+  07_analysis.R
