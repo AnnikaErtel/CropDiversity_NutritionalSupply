@@ -29,3 +29,16 @@ Keep the right order for running the code!
        -> Make one global table containing all variables for analysis
        
   07_analysis.R
+       -> Containing further data exploration
+       -> Containing all plots made for the thesis paper (excl. variable tables) 
+               -Worldmap
+               -Histogram full basket
+               -CorrPlot (R &R^2) 
+               -Development of full basket
+               -Development of self-sufficient food basket
+               -Combi Fig: GDP SEA and SSA
+               -Model tables
+               -Plots of residuals
+       -> Containing more tested models and respective notes on that
+       -> Containing Null model
+       
